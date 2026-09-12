@@ -8,10 +8,12 @@ from app.models.task import Task
 from app.models.event import Event
 from app.models.schedule import Schedule
 from app.models.chat import ChatMessage
+from app.models.preference import UserPreference
 
 __all__ = [
     "Task",
     "Event",
     "Schedule",
     "ChatMessage",
+    "UserPreference",
 ]

@@ -16,7 +16,8 @@ from typing import Optional
 class ToolCall:
     """LLM 请求调用的一个工具。"""
 
-    name: str
+    id: str = ""
+    name: str = ""
     arguments: dict = field(default_factory=dict)
 
 
@@ -26,6 +27,9 @@ class LLMResponse:
 
     text: Optional[str] = None
     tool_calls: Optional[list[ToolCall]] = None
+    #: 模型返回的原始 assistant 消息（含 reasoning_content 等字段）。
+    #: 某些 reasoning 模型（如 DeepSeek）要求后续调用原样回传，否则报 400。
+    raw_message: Optional[dict] = None
 
     def is_text(self) -> bool:
         return self.tool_calls is None

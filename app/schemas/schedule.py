@@ -39,6 +39,19 @@ class ScheduleResponse(ScheduleBase):
     created_at: datetime
 
 
+class ScheduleWindow(BaseModel):
+    """一个允许安排任务的时间窗口。"""
+
+    start: datetime
+    end: datetime
+
+    @model_validator(mode="after")
+    def _check_time_range(self):
+        if self.end <= self.start:
+            raise ValueError("结束时间必须晚于开始时间")
+        return self
+
+
 class ScheduleGenerateRequest(BaseModel):
     """自动规划参数。"""
 
@@ -46,6 +59,10 @@ class ScheduleGenerateRequest(BaseModel):
     start: Optional[datetime] = None
     #: 规划天数。
     days: int = Field(default=7, ge=1, le=30)
+    #: 显式时间窗口（例如「今天晚上 + 明天下午」）；传入后优先于 start/days。
+    windows: Optional[List[ScheduleWindow]] = None
+    #: 相邻任务之间的最小空闲间隔（分钟）。
+    gap_minutes: int = Field(default=0, ge=0, le=240)
 
 
 class UnscheduledTask(BaseModel):

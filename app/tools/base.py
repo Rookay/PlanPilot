@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 ConfirmationLevel = Literal["none", "auto", "confirm"]
 
@@ -30,7 +31,10 @@ class Tool(ABC):
     """工具基类。
 
     子类需定义 name / description / input_schema / output_schema / confirmation，
-    并实现 :meth:`execute`。execute 不向外抛异常，错误统一封装进 ToolResult。
+    并实现 :meth:`execute`。
+
+    - ``execute`` 不向外抛异常，错误统一封装进 ToolResult；
+    - ``preview`` 用于 confirm 级别工具：只描述将要做什么、不做任何修改。
     """
 
     name: str = ""
@@ -40,8 +44,17 @@ class Tool(ABC):
     confirmation: ConfirmationLevel = "none"
 
     @abstractmethod
-    def execute(self, **kwargs: Any) -> ToolResult:
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
         ...
+
+    def preview(self, db: Session, **kwargs: Any) -> ToolResult:
+        """默认预览：只提示即将执行的工具名，不做任何副作用。"""
+
+        return ToolResult(
+            success=True,
+            needs_confirmation=True,
+            summary=f"即将执行 {self.name}，参数：{kwargs or {}}",
+        )
 
     def schema(self) -> dict:
         """返回 OpenAI 风格 function-calling 描述，供 LLM 自动选择与传参。"""

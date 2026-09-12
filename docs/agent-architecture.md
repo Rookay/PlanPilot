@@ -5,6 +5,25 @@
 
 ---
 
+## 实施状态（已落地）
+
+架构已完成第一版实现，核心代码均可用：
+
+- ✅ Planning Engine 抽取到 `app/planning/engine.py`（generate / find_free_slots / check_conflicts / evaluate_plan）
+- ✅ 业务逻辑抽取到 `app/services/`（task / event / schedule）
+- ✅ Tool 骨架 + 22 个工具（`app/tools/`）
+- ✅ Skill 系统（`app/skills/`，第一版为提示词档案）
+- ✅ Agent Loop / Context / Memory / Confirmation（`app/agent/`）
+- ✅ LLM Provider 抽象 + MockProvider + OpenAICompatibleProvider（`app/llm/`）
+- ✅ Agent API：`POST /api/agent/chat`（`app/api/agent.py`）
+- ✅ 前端对话窗口接入 Agent，支持确认/取消
+- ✅ 用户偏好存储（`user_preferences` 表）
+
+接入真实大模型见 [docs/llm-integration.md](./llm-integration.md)。
+
+---
+
+
 ## 1. 当前项目架构分析
 
 ### 1.1 实际目录结构（以仓库为准）

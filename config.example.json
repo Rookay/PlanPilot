@@ -1,0 +1,17 @@
+{
+  "llm": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-你的密钥",
+    "model": "gpt-4o-mini"
+  },
+  "external": {
+    "weather": {
+      "base_url": "",
+      "api_key": ""
+    },
+    "maps": {
+      "base_url": "",
+      "api_key": ""
+    }
+  }
+}

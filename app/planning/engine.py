@@ -178,6 +178,8 @@ def generate_plan(
     scheduled_task_ids: Set[int],
     day_start: time = DEFAULT_DAY_START,
     day_end: time = DEFAULT_DAY_END,
+    windows: Optional[List[Tuple[datetime, datetime]]] = None,
+    gap_minutes: int = 0,
 ) -> PlanResult:
     """贪心排期。
 
@@ -189,6 +191,8 @@ def generate_plan(
         scheduled_task_ids: 已有日程的任务 id 集合，这些任务将被跳过。
         day_start: 每天可安排的最早时间。
         day_end: 每天可安排的最晚时间。
+        windows: 显式指定可安排的时间窗口；传入后优先于 start/days/day_start/day_end。
+        gap_minutes: 相邻任务之间的最小空闲间隔（分钟）。
 
     Returns:
         PlanResult：成功安排的任务 + 未能安排的任务及原因。
@@ -197,12 +201,16 @@ def generate_plan(
         ValueError: 规划时间窗口为空。
     """
 
-    windows = _build_windows(start, days, day_start, day_end)
-    if not windows:
+    if windows is not None:
+        planning_windows = sorted(windows)
+    else:
+        planning_windows = _build_windows(start, days, day_start, day_end)
+
+    if not planning_windows:
         raise ValueError("规划时间窗口为空")
 
-    horizon_start = windows[0][0]
-    horizon_end = windows[-1][1]
+    horizon_start = planning_windows[0][0]
+    horizon_end = planning_windows[-1][1]
 
     # 只保留与规划窗口有交集的忙碌区间。
     busy = [
@@ -212,6 +220,7 @@ def generate_plan(
     ]
     busy = _merge_intervals(busy)
 
+    gap = timedelta(minutes=max(gap_minutes, 0))
     ordered = sorted(tasks, key=_sort_key)
 
     assignments: List[PlanAssignment] = []
@@ -231,7 +240,7 @@ def generate_plan(
             continue
 
         slot_start = _find_free_slot(
-            windows=windows,
+            windows=planning_windows,
             busy=busy,
             duration=duration,
             earliest=max(earliest, horizon_start),
@@ -251,6 +260,144 @@ def generate_plan(
         assignments.append(
             PlanAssignment(task.id, slot_start, slot_start + duration)
         )
-        busy = _merge_intervals(busy + [(slot_start, slot_start + duration)])
+        # 留出任务之间的空闲间隔。
+        busy = _merge_intervals(
+            busy + [(slot_start, slot_start + duration + gap)]
+        )
 
     return PlanResult(assignments=assignments, failures=failures)
+
+
+# ---------------------------------------------------------------------------
+# 分析类工具（确定性）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Interval:
+    """一个时间区间（用于冲突检测）。"""
+
+    id: int
+    title: str
+    start: datetime
+    end: datetime
+
+
+@dataclass
+class Conflict:
+    """两个区间之间的重叠。"""
+
+    first: Interval
+    second: Interval
+    overlap_minutes: int
+
+
+@dataclass
+class Evaluation:
+    """计划评估结果。"""
+
+    score: int  # 0-100
+    issues: List[str]
+
+
+def find_free_slots(
+    *,
+    start: datetime,
+    days: int,
+    busy_intervals: Iterable[Tuple[datetime, datetime]],
+    day_start: time = DEFAULT_DAY_START,
+    day_end: time = DEFAULT_DAY_END,
+    min_duration: timedelta = timedelta(minutes=SLOT_MINUTES),
+) -> List[Tuple[datetime, datetime]]:
+    """找出所有满足最短时长的空闲时间段（按时间升序）。"""
+
+    windows = _build_windows(start, days, day_start, day_end)
+    if not windows:
+        return []
+
+    horizon_start = windows[0][0]
+    horizon_end = windows[-1][1]
+
+    busy = [
+        (interval_start, interval_end)
+        for interval_start, interval_end in busy_intervals
+        if interval_end > horizon_start and interval_start < horizon_end
+    ]
+    busy = _merge_intervals(busy)
+
+    slots: List[Tuple[datetime, datetime]] = []
+
+    for window_start, window_end in windows:
+        cursor = _ceil_to_slot(window_start)
+        if cursor >= window_end:
+            continue
+
+        for busy_start, busy_end in busy:
+            if busy_end <= cursor:
+                continue
+            if busy_start >= window_end:
+                break
+            if busy_start > cursor:
+                gap_end = min(busy_start, window_end)
+                if gap_end - cursor >= min_duration:
+                    slots.append((cursor, gap_end))
+            cursor = _ceil_to_slot(max(cursor, busy_end))
+            if cursor >= window_end:
+                break
+
+        if cursor < window_end and (window_end - cursor) >= min_duration:
+            slots.append((cursor, window_end))
+
+    return slots
+
+
+def check_conflicts(intervals: Sequence[Interval]) -> List[Conflict]:
+    """检测时间区间之间的重叠（按开始时间排序后两两比较）。"""
+
+    ordered = sorted(intervals, key=lambda item: item.start)
+    conflicts: List[Conflict] = []
+
+    for index, first in enumerate(ordered):
+        for second in ordered[index + 1:]:
+            if second.start >= first.end:
+                break
+            overlap = min(first.end, second.end) - second.start
+            conflicts.append(
+                Conflict(
+                    first=first,
+                    second=second,
+                    overlap_minutes=int(overlap.total_seconds() // 60),
+                )
+            )
+
+    return conflicts
+
+
+def evaluate_plan(
+    assignments: Sequence[PlanAssignment],
+    failures: Sequence[PlanFailure],
+    tasks_by_id: dict,
+) -> Evaluation:
+    """评估计划质量，返回 0-100 分与问题列表。"""
+
+    issues: List[str] = []
+    score = 100
+
+    for failure in failures:
+        issues.append(f"{failure.title}: {failure.reason}")
+        score -= 10
+
+    for assignment in assignments:
+        task = tasks_by_id.get(assignment.task_id)
+        if (
+            task is not None
+            and task.deadline is not None
+            and assignment.end_time > task.deadline
+        ):
+            issues.append(
+                f"{task.title}: 结束于 {assignment.end_time}，晚于截止时间 {task.deadline}"
+            )
+            score -= 20
+
+    score = max(0, min(100, score))
+    return Evaluation(score=score, issues=issues)

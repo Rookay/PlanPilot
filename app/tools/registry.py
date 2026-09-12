@@ -5,6 +5,8 @@
 
 from typing import Dict, List
 
+from sqlalchemy.orm import Session
+
 from app.tools.base import Tool, ToolResult
 
 
@@ -31,22 +33,32 @@ class ToolRegistry:
             for tool in self._tools.values()
         ]
 
-    def execute(self, name: str, args: dict | None = None) -> ToolResult:
-        """统一执行入口。
-
-        职责：
-        - 校验工具是否存在；
-        - 捕获工具内部异常并转成 ToolResult 失败态（不让异常打断 Agent Loop）。
-        """
+    def execute(self, name: str, args: dict | None, db: Session) -> ToolResult:
+        """统一执行入口：校验工具、执行、吸收异常。"""
 
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(success=False, error=f"unknown tool: {name}")
 
         try:
-            return tool.execute(**(args or {}))
+            return tool.execute(db, **(args or {}))
         except Exception as exc:  # noqa: BLE001 —— 工具异常必须被吸收
             return ToolResult(
                 success=False,
                 error=f"{name} 执行失败: {exc}",
+            )
+
+    def preview(self, name: str, args: dict | None, db: Session) -> ToolResult:
+        """生成 confirm 级别工具的预览（不做修改）。"""
+
+        tool = self._tools.get(name)
+        if tool is None:
+            return ToolResult(success=False, error=f"unknown tool: {name}")
+
+        try:
+            return tool.preview(db, **(args or {}))
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(
+                success=False,
+                error=f"{name} 预览失败: {exc}",
             )

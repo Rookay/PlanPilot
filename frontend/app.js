@@ -33,6 +33,8 @@ const state = {
   editingTaskId: null,
   chatMessages: [],
   chatLoading: false,
+  chatSessionId: null,
+  chatPendingConfirmation: null,
 };
 
 
@@ -211,7 +213,7 @@ function showPage(pageName) {
       })
       .catch(handleError);
   } else if (pageName === "chat") {
-    loadChatMessages().catch(handleError);
+    renderChatMessages();
   }
 }
 
@@ -817,25 +819,8 @@ function goToday() {
 
 
 /* =========================
-   对话助手
+   对话助手（接入 Agent）
 ========================= */
-
-async function loadChatMessages() {
-  try {
-    state.chatMessages = await api("/chat/messages");
-    renderChatMessages();
-  } catch (error) {
-    const container = $("chatMessages");
-    if (container) {
-      container.innerHTML = `
-        <div class="chat-empty error">
-          加载对话失败：${escapeHtml(error.message)}
-        </div>
-      `;
-    }
-    throw error;
-  }
-}
 
 function renderChatMessages() {
   const container = $("chatMessages");
@@ -847,35 +832,45 @@ function renderChatMessages() {
     container.innerHTML = `
       <div class="chat-empty">还没有对话，和助手打个招呼吧</div>
     `;
-    return;
+  } else {
+    const bubbles = state.chatMessages
+      .map((message) => {
+        const isUser = message.role === "user";
+        const roleClass = isUser ? "chat-user" : "chat-assistant";
+        const label = isUser ? "我" : "助手";
+
+        return `
+          <div class="chat-bubble ${roleClass}">
+            <div class="chat-bubble-label">${escapeHtml(label)}</div>
+            <div class="chat-bubble-content">${escapeHtml(message.content)}</div>
+          </div>
+        `;
+      })
+      .join("");
+
+    const loading = state.chatLoading
+      ? `
+        <div class="chat-bubble chat-assistant">
+          <div class="chat-bubble-label">助手</div>
+          <div class="chat-bubble-content chat-typing">正在思考…</div>
+        </div>
+      `
+      : "";
+
+    container.innerHTML = bubbles + loading;
+    scrollChatToBottom();
   }
 
-  const bubbles = state.chatMessages
-    .map((message) => {
-      const isUser = message.role === "user";
-      const roleClass = isUser ? "chat-user" : "chat-assistant";
-      const label = isUser ? "我" : "助手";
-
-      return `
-        <div class="chat-bubble ${roleClass}">
-          <div class="chat-bubble-label">${escapeHtml(label)}</div>
-          <div class="chat-bubble-content">${escapeHtml(message.content)}</div>
-        </div>
-      `;
-    })
-    .join("");
-
-  const loading = state.chatLoading
-    ? `
-      <div class="chat-bubble chat-assistant">
-        <div class="chat-bubble-label">助手</div>
-        <div class="chat-bubble-content chat-typing">正在思考…</div>
-      </div>
-    `
-    : "";
-
-  container.innerHTML = bubbles + loading;
-  scrollChatToBottom();
+  const bar = $("chatConfirmBar");
+  if (bar) {
+    if (state.chatPendingConfirmation) {
+      $("chatConfirmSummary").textContent =
+        "待确认：" + state.chatPendingConfirmation.summary;
+      bar.classList.remove("hidden");
+    } else {
+      bar.classList.add("hidden");
+    }
+  }
 }
 
 function scrollChatToBottom() {
@@ -904,41 +899,82 @@ async function sendChatMessage() {
   input.value = "";
   autoResizeChatInput();
 
-  // 先临时显示用户消息，后端返回后再用真实消息替换。
-  const tempId = Date.now();
-  state.chatMessages.push({ id: tempId, role: "user", content });
+  state.chatPendingConfirmation = null;
+  state.chatMessages.push({ role: "user", content });
   state.chatLoading = true;
   renderChatMessages();
 
   try {
-    const result = await api("/chat/messages", {
+    const data = await api("/agent/chat", {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        message: content,
+        session_id: state.chatSessionId,
+      }),
     });
 
-    state.chatMessages = state.chatMessages.filter((item) => item.id !== tempId);
-    state.chatMessages.push(result.user_message, result.assistant_message);
+    state.chatSessionId = data.session_id;
+    state.chatMessages.push({ role: "assistant", content: data.reply });
+
+    if (data.confirmation && data.confirmation.required) {
+      state.chatPendingConfirmation = {
+        action_id: data.confirmation.action_id,
+        summary: data.confirmation.summary,
+      };
+    }
   } catch (error) {
-    state.chatMessages = state.chatMessages.filter((item) => item.id !== tempId);
-    alert(`发送失败：${error.message}`);
+    state.chatMessages.push({
+      role: "assistant",
+      content: `发送失败：${error.message}`,
+    });
   } finally {
     state.chatLoading = false;
     renderChatMessages();
   }
 }
 
-async function clearChat() {
-  if (!confirm("确定清空所有对话记录吗？")) {
+async function confirmChatDecision(decision) {
+  if (!state.chatPendingConfirmation || state.chatLoading) {
     return;
   }
 
+  const pending = state.chatPendingConfirmation;
+  state.chatPendingConfirmation = null;
+  state.chatLoading = true;
+  renderChatMessages();
+
   try {
-    await api("/chat/messages", { method: "DELETE" });
-    state.chatMessages = [];
-    renderChatMessages();
+    const data = await api("/agent/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        message: "",
+        session_id: state.chatSessionId,
+        confirm_action_id: pending.action_id,
+        decision,
+      }),
+    });
+
+    state.chatSessionId = data.session_id;
+    state.chatMessages.push({ role: "assistant", content: data.reply });
   } catch (error) {
-    alert(`清空失败：${error.message}`);
+    state.chatMessages.push({
+      role: "assistant",
+      content: `操作失败：${error.message}`,
+    });
+  } finally {
+    state.chatLoading = false;
+    renderChatMessages();
   }
+}
+
+function clearChat() {
+  if (!confirm("确定清空对话吗？")) {
+    return;
+  }
+  state.chatMessages = [];
+  state.chatSessionId = null;
+  state.chatPendingConfirmation = null;
+  renderChatMessages();
 }
 
 

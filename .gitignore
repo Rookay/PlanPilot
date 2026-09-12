@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 本地配置（含密钥，不要提交）
+config.json
+.env
+
+# 本地数据库
+schedule.db
+
+# IDE
+.idea/
+.vscode/
