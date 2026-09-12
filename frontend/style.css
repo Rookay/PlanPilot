@@ -1,0 +1,723 @@
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Arial, "Microsoft YaHei", sans-serif;
+    background: #f5f6f8;
+    color: #222;
+}
+
+.app {
+    display: flex;
+    min-height: 100vh;
+}
+
+
+/* 左侧菜单 */
+
+.sidebar {
+    width: 230px;
+    background: #ffffff;
+    border-right: 1px solid #ddd;
+    padding: 25px 15px;
+}
+
+.sidebar h1 {
+    font-size: 20px;
+    margin: 0 0 20px 10px;
+}
+
+.sidebar .sidebar-create {
+    width: 100%;
+    margin-bottom: 20px;
+    text-align: center;
+    background: #222;
+    color: #fff;
+}
+
+.sidebar nav {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.sidebar button {
+    border: none;
+    background: transparent;
+    text-align: left;
+    padding: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 15px;
+}
+
+.sidebar button:hover {
+    background: #f0f0f0;
+}
+
+.sidebar .sidebar-create:hover {
+    background: #444;
+}
+
+
+/* 主区域 */
+
+.main {
+    flex: 1;
+    padding: 40px;
+    max-width: 1200px;
+}
+
+.page h2 {
+    margin-top: 0;
+    font-size: 28px;
+}
+
+.page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 25px;
+    flex-wrap: wrap;
+}
+
+.page-header p {
+    color: #777;
+    margin: 6px 0 0;
+}
+
+.muted {
+    color: #777;
+}
+
+.section-title {
+    margin: 30px 0 12px;
+    font-size: 18px;
+}
+
+
+/* Dashboard */
+
+.cards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+}
+
+.card {
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 25px;
+    width: 200px;
+}
+
+.card-title {
+    color: #777;
+    margin-bottom: 10px;
+}
+
+.card-number {
+    font-size: 32px;
+    font-weight: bold;
+}
+
+
+/* Button */
+
+.primary-button {
+    border: none;
+    background: #222;
+    color: white;
+    padding: 10px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.primary-button:hover {
+    background: #444;
+}
+
+.ghost-button {
+    border: 1px solid #ccc;
+    background: white;
+    color: #333;
+    padding: 6px 12px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.ghost-button:hover {
+    background: #f2f2f2;
+}
+
+
+/* Task */
+
+.task-list {
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.task {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    padding: 18px 20px;
+    border-bottom: 1px solid #eee;
+}
+
+.task:last-child {
+    border-bottom: none;
+}
+
+.task-done .task-title {
+    text-decoration: line-through;
+    color: #999;
+}
+
+.task-main {
+    min-width: 0;
+}
+
+.task-title {
+    font-size: 16px;
+    font-weight: bold;
+    word-break: break-word;
+}
+
+.task-info {
+    margin-top: 6px;
+    color: #777;
+    font-size: 13px;
+}
+
+.task-desc {
+    margin-top: 6px;
+    color: #555;
+    font-size: 13px;
+    word-break: break-word;
+}
+
+.task-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+}
+
+.delete-button {
+    border: none;
+    background: transparent;
+    color: #999;
+    cursor: pointer;
+    padding: 6px 8px;
+}
+
+.delete-button:hover {
+    color: red;
+}
+
+.empty {
+    padding: 30px;
+    text-align: center;
+    color: #999;
+}
+
+.empty.error {
+    color: #c0392b;
+}
+
+
+/* 仪表盘上的精简任务列表 */
+
+.task-list.compact .mini-task {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 18px;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.task-list.compact .mini-task:last-child {
+    border-bottom: none;
+}
+
+.mini-task-title {
+    font-weight: bold;
+    word-break: break-word;
+}
+
+.mini-task-meta {
+    color: #888;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+
+/* Modal */
+
+.modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-content {
+    background: white;
+    width: 450px;
+    max-width: calc(100vw - 40px);
+    padding: 30px;
+    border-radius: 8px;
+    max-height: calc(100vh - 40px);
+    overflow: auto;
+}
+
+.modal-content h2 {
+    margin-top: 0;
+}
+
+.modal-content label {
+    display: block;
+    margin-top: 15px;
+}
+
+.modal-content input,
+.modal-content textarea,
+.modal-content select {
+    width: 100%;
+    margin-top: 6px;
+    padding: 9px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+
+.modal-content textarea {
+    height: 80px;
+    resize: vertical;
+}
+
+.modal-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 25px;
+}
+
+.modal-buttons button {
+    padding: 9px 15px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    background: white;
+    color: #333;
+    cursor: pointer;
+}
+
+.modal-buttons button:hover {
+    background: #f2f2f2;
+}
+
+/* 必须显式覆盖背景色：.modal-buttons button 的优先级高于 .primary-button，
+   否则主按钮会变成白底白字（文字不可见）。 */
+.modal-buttons .primary-button {
+    border: none;
+    background: #222;
+    color: #fff;
+}
+
+.modal-buttons .primary-button:hover {
+    background: #444;
+}
+
+
+/* 周导航与图例 */
+
+.calendar-nav {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.week-label {
+    font-size: 14px;
+    color: #555;
+    min-width: 160px;
+    text-align: center;
+}
+
+.legend {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+    font-size: 13px;
+    color: #555;
+}
+
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.dot-event {
+    background: #3498db;
+}
+
+.dot-schedule {
+    background: #e67e22;
+}
+
+.dot-accepted {
+    background: #27ae60;
+}
+
+.dot-task {
+    background: #8e44ad;
+}
+
+
+/* 日程表格（小时 × 日期） */
+
+.timetable-host {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    overflow: auto;
+    max-height: 72vh;
+    background: #fff;
+}
+
+.tt-head {
+    display: grid;
+    grid-template-columns: 64px repeat(7, minmax(0, 1fr));
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #fff;
+    border-bottom: 1px solid #e2e2e2;
+}
+
+.tt-corner {
+    border-right: 1px solid #eee;
+}
+
+.tt-head-day {
+    padding: 8px 4px;
+    text-align: center;
+    font-size: 13px;
+    border-left: 1px solid #eee;
+}
+
+.tt-head-date {
+    color: #999;
+    font-size: 12px;
+    margin-top: 2px;
+}
+
+.tt-head-day.tt-today {
+    background: #fff7e6;
+    color: #c0392b;
+    font-weight: bold;
+}
+
+.tt-body {
+    display: flex;
+}
+
+.tt-times {
+    width: 64px;
+    flex-shrink: 0;
+    border-right: 1px solid #eee;
+}
+
+.tt-hour-label {
+    height: 48px;
+    font-size: 12px;
+    color: #999;
+    text-align: right;
+    padding-right: 8px;
+    padding-top: 2px;
+}
+
+.tt-cols {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.tt-col {
+    position: relative;
+    border-left: 1px solid #eee;
+}
+
+.tt-col.tt-today {
+    background: #fffdf5;
+}
+
+.tt-hour {
+    height: 48px;
+    border-bottom: 1px solid #f4f4f4;
+}
+
+.tt-item {
+    position: absolute;
+    left: 3px;
+    right: 3px;
+    border-radius: 5px;
+    border-left: 3px solid #999;
+    background: #eef1f5;
+    padding: 3px 6px;
+    font-size: 11px;
+    line-height: 1.3;
+    overflow: hidden;
+    cursor: default;
+}
+
+.tt-item-title {
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tt-item-time {
+    color: #666;
+}
+
+.tt-event {
+    background: #e8f1fb;
+    border-left-color: #3498db;
+}
+
+.tt-schedule {
+    background: #fdf0e3;
+    border-left-color: #e67e22;
+}
+
+.tt-accepted {
+    background: #eafaf1;
+    border-left-color: #27ae60;
+}
+
+.tt-task {
+    background: #f1ecfb;
+    border-left-color: #8e44ad;
+}
+
+
+/* 日程规划清单 */
+
+.planning-actions {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.schedule-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+.schedule {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 14px 18px;
+}
+
+.schedule-accepted {
+    border-color: #27ae60;
+    background: #f4fdf8;
+}
+
+.schedule-time {
+    flex-shrink: 0;
+    width: 150px;
+    color: #555;
+    font-size: 13px;
+}
+
+.schedule-title {
+    flex: 1;
+    font-weight: bold;
+    word-break: break-word;
+}
+
+.schedule-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.unscheduled {
+    margin-top: 20px;
+    background: #fff8e1;
+    border: 1px solid #ffe082;
+    border-radius: 8px;
+    padding: 15px 20px;
+}
+
+.unscheduled h4 {
+    margin: 0 0 10px;
+}
+
+.unscheduled ul {
+    margin: 0;
+    padding-left: 20px;
+    color: #7a5c00;
+}
+
+
+/* 对话助手 */
+
+.chat-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 20px;
+    height: 60vh;
+    overflow-y: auto;
+    margin-bottom: 16px;
+}
+
+.chat-empty {
+    margin: auto;
+    color: #999;
+    text-align: center;
+}
+
+.chat-empty.error {
+    color: #c0392b;
+}
+
+.chat-bubble {
+    max-width: 75%;
+    display: flex;
+    flex-direction: column;
+}
+
+.chat-user {
+    align-self: flex-end;
+    align-items: flex-end;
+}
+
+.chat-assistant {
+    align-self: flex-start;
+    align-items: flex-start;
+}
+
+.chat-bubble-label {
+    font-size: 12px;
+    color: #999;
+    margin-bottom: 4px;
+}
+
+.chat-bubble-content {
+    padding: 10px 14px;
+    border-radius: 10px;
+    line-height: 1.5;
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+
+.chat-user .chat-bubble-content {
+    background: #222;
+    color: #fff;
+    border-top-right-radius: 2px;
+}
+
+.chat-assistant .chat-bubble-content {
+    background: #f0f0f0;
+    color: #222;
+    border-top-left-radius: 2px;
+}
+
+.chat-typing {
+    color: #999;
+}
+
+.chat-input-bar {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+}
+
+.chat-input-bar textarea {
+    flex: 1;
+    resize: none;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 14px;
+    line-height: 1.4;
+    max-height: 120px;
+    font-family: inherit;
+}
+
+.chat-input-bar textarea:focus {
+    outline: none;
+    border-color: #222;
+}
+
+
+/* 隐藏 */
+
+.hidden {
+    display: none !important;
+}
+
+
+/* 小屏适配 */
+
+@media (max-width: 900px) {
+    .app {
+        flex-direction: column;
+    }
+
+    .sidebar {
+        width: 100%;
+        border-right: none;
+        border-bottom: 1px solid #ddd;
+    }
+
+    .sidebar nav {
+        flex-direction: row;
+        flex-wrap: wrap;
+    }
+
+    .main {
+        padding: 20px;
+    }
+
+    .timetable-host {
+        max-height: 60vh;
+    }
+}

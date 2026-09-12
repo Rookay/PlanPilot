@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>日程规划助手</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<div class="app">
+
+    <aside class="sidebar">
+        <h1>日程规划助手</h1>
+
+        <button class="primary-button sidebar-create" onclick="openTaskModal()">
+            + 新建任务
+        </button>
+
+        <nav>
+            <button onclick="showPage('dashboard')">仪表盘</button>
+            <button onclick="showPage('tasks')">我的任务</button>
+            <button onclick="showPage('calendar')">日历</button>
+            <button onclick="showPage('planning')">日程规划</button>
+            <button onclick="showPage('chat')">对话助手</button>
+        </nav>
+    </aside>
+
+
+    <main class="main">
+
+        <!-- 仪表盘 -->
+        <section id="dashboard" class="page">
+            <div class="page-header">
+                <div>
+                    <h2>仪表盘</h2>
+                    <p>今天也要好好安排时间</p>
+                </div>
+
+                <button class="primary-button" onclick="openTaskModal()">
+                    + 新建任务
+                </button>
+            </div>
+
+            <div class="cards">
+                <div class="card">
+                    <div class="card-title">待完成任务</div>
+                    <div id="pendingCount" class="card-number">0</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">进行中</div>
+                    <div id="inProgressCount" class="card-number">0</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">已完成任务</div>
+                    <div id="completedCount" class="card-number">0</div>
+                </div>
+
+                <div class="card">
+                    <div class="card-title">已取消</div>
+                    <div id="cancelledCount" class="card-number">0</div>
+                </div>
+            </div>
+
+            <h3 class="section-title">最近任务</h3>
+            <div id="dashboardTaskList" class="task-list compact"></div>
+        </section>
+
+
+        <!-- 任务 -->
+        <section id="tasks" class="page hidden">
+
+            <div class="page-header">
+                <div>
+                    <h2>我的任务</h2>
+                    <p>管理需要完成的事情</p>
+                </div>
+
+                <button class="primary-button" onclick="openTaskModal()">
+                    + 新建任务
+                </button>
+            </div>
+
+
+            <div id="taskList" class="task-list">
+                <!-- JavaScript 动态生成 -->
+            </div>
+
+        </section>
+
+
+        <!-- 日历 -->
+        <section id="calendar" class="page hidden">
+
+            <div class="page-header">
+                <div>
+                    <h2>日历</h2>
+                    <p>按小时查看这一周的安排</p>
+                </div>
+
+                <div class="calendar-nav">
+                    <button class="ghost-button" onclick="previousWeek()">‹ 上一周</button>
+                    <span class="week-label"></span>
+                    <button class="ghost-button" onclick="goToday()">今天</button>
+                    <button class="ghost-button" onclick="nextWeek()">下一周 ›</button>
+                </div>
+            </div>
+
+            <div class="legend">
+                <span class="legend-item"><i class="dot dot-event"></i>事件</span>
+                <span class="legend-item"><i class="dot dot-schedule"></i>未确认日程</span>
+                <span class="legend-item"><i class="dot dot-accepted"></i>已确认日程</span>
+                <span class="legend-item"><i class="dot dot-task"></i>待安排任务</span>
+            </div>
+
+            <div id="calendarGrid" class="timetable-host"></div>
+
+        </section>
+
+
+        <!-- 对话助手 -->
+        <section id="chat" class="page hidden">
+
+            <div class="page-header">
+                <div>
+                    <h2>对话助手</h2>
+                    <p class="muted">和 AI 助手聊聊你的日程安排</p>
+                </div>
+
+                <button class="ghost-button" onclick="clearChat()">
+                    清空对话
+                </button>
+            </div>
+
+            <div id="chatMessages" class="chat-messages">
+                <!-- JavaScript 动态生成 -->
+            </div>
+
+            <div class="chat-input-bar">
+                <textarea
+                    id="chatInput"
+                    rows="1"
+                    placeholder="输入消息，例如：帮我看看这周有什么安排"></textarea>
+
+                <button
+                    id="chatSendButton"
+                    class="primary-button"
+                    onclick="sendChatMessage()">
+                    发送
+                </button>
+            </div>
+
+        </section>
+
+
+        <!-- 日程规划 -->
+        <section id="planning" class="page hidden">
+
+            <div class="page-header">
+                <div>
+                    <h2>日程规划</h2>
+                    <p class="muted">自动把任务安排到未来 7 天的空闲时间</p>
+                </div>
+
+                <div class="calendar-nav">
+                    <button class="ghost-button" onclick="previousWeek()">‹ 上一周</button>
+                    <span class="week-label"></span>
+                    <button class="ghost-button" onclick="goToday()">今天</button>
+                    <button class="ghost-button" onclick="nextWeek()">下一周 ›</button>
+                </div>
+            </div>
+
+            <div class="planning-actions">
+                <button class="primary-button" onclick="generateSchedule()">
+                    开始规划
+                </button>
+
+                <button class="ghost-button" onclick="clearSchedules()">
+                    清空未确认日程
+                </button>
+            </div>
+
+            <div id="planningTimetable" class="timetable-host"></div>
+
+            <div id="scheduleResult"></div>
+
+        </section>
+
+    </main>
+
+</div>
+
+
+<!-- 新建 / 编辑任务弹窗 -->
+
+<div id="taskModal" class="modal hidden">
+
+    <div class="modal-content">
+
+        <h2 id="modalTitle">新建任务</h2>
+
+        <label>
+            任务名称
+            <input
+                id="taskTitle"
+                type="text"
+                placeholder="例如：完成论文实验">
+        </label>
+
+
+        <label>
+            描述
+            <textarea
+                id="taskDescription"
+                placeholder="任务描述"></textarea>
+        </label>
+
+
+        <label>
+            开始时间
+            <input
+                id="taskStartTime"
+                type="datetime-local">
+        </label>
+
+
+        <label>
+            持续时间（分钟）
+            <input
+                id="taskDuration"
+                type="number"
+                min="1"
+                value="60">
+        </label>
+
+
+        <label>
+            优先级
+
+            <select id="taskPriority">
+                <option value="low">低</option>
+                <option value="medium" selected>中</option>
+                <option value="high">高</option>
+            </select>
+        </label>
+
+
+        <div class="modal-buttons">
+
+            <button onclick="closeTaskModal()">
+                取消
+            </button>
+
+            <button
+                id="taskSubmitButton"
+                class="primary-button"
+                onclick="submitTask()">
+                创建任务
+            </button>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- 默认会自动使用「当前主机:8000」。
+     如果后端部署在别的主机/端口，取消下面这行注释并改成实际地址：
+<script>window.API_URL = "http://192.168.1.50:8000/api";</script>
+-->
+
+<script src="app.js"></script>
+
+</body>
+</html>
