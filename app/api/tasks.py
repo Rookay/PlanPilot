@@ -1,22 +1,14 @@
 # -*- coding: UTF-8 -*-
-# Project ：mine 
+# Project ：mine
 # File    ：tasks.py
-# IDE     ：PyCharm 
-# Author  ：刘景涛
-# Date    ：2026/9/11 14:13
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.schedule import Schedule
-from app.models.task import Task
-from app.schemas.task import (
-    TaskCreate,
-    TaskResponse,
-    TaskUpdate,
-)
+from app.schemas.task import TaskCreate, TaskResponse, TaskUpdate
+from app.services import task_service
 
 router = APIRouter(
     prefix="/api/tasks",
@@ -24,27 +16,15 @@ router = APIRouter(
 )
 
 
-@router.post(
-    "",
-    response_model=TaskResponse,
-)
+@router.post("", response_model=TaskResponse)
 def create_task(
     task_data: TaskCreate,
     db: Session = Depends(get_db),
 ):
-    task = Task(**task_data.model_dump())
-
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-
-    return task
+    return task_service.create_task(db, task_data)
 
 
-@router.get(
-    "",
-    response_model=List[TaskResponse],
-)
+@router.get("", response_model=List[TaskResponse])
 def get_tasks(
     status: Optional[str] = Query(
         default=None,
@@ -52,103 +32,29 @@ def get_tasks(
     ),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Task)
-
-    if status:
-        query = query.filter(Task.status == status)
-
-    return (
-        query
-        .order_by(Task.created_at.desc())
-        .all()
-    )
+    return task_service.list_tasks(db, status)
 
 
-@router.get(
-    "/{task_id}",
-    response_model=TaskResponse,
-)
+@router.get("/{task_id}", response_model=TaskResponse)
 def get_task(
     task_id: int,
     db: Session = Depends(get_db),
 ):
-    task = (
-        db.query(Task)
-        .filter(Task.id == task_id)
-        .first()
-    )
-
-    if task is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
-
-    return task
+    return task_service.get_task(db, task_id)
 
 
-@router.put(
-    "/{task_id}",
-    response_model=TaskResponse,
-)
+@router.put("/{task_id}", response_model=TaskResponse)
 def update_task(
     task_id: int,
     task_data: TaskUpdate,
     db: Session = Depends(get_db),
 ):
-    task = (
-        db.query(Task)
-        .filter(Task.id == task_id)
-        .first()
-    )
-
-    if task is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
-
-    update_data = task_data.model_dump(
-        exclude_unset=True
-    )
-
-    for key, value in update_data.items():
-        setattr(task, key, value)
-
-    db.commit()
-    db.refresh(task)
-
-    return task
+    return task_service.update_task(db, task_id, task_data)
 
 
-@router.delete(
-    "/{task_id}",
-)
+@router.delete("/{task_id}")
 def delete_task(
     task_id: int,
     db: Session = Depends(get_db),
 ):
-    task = (
-        db.query(Task)
-        .filter(Task.id == task_id)
-        .first()
-    )
-
-    if task is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Task not found",
-        )
-
-    # 先删除关联日程，避免外键约束报错并防止残留孤立数据。
-    db.query(Schedule).filter(
-        Schedule.task_id == task_id
-    ).delete(synchronize_session=False)
-
-    db.delete(task)
-    db.commit()
-
-    return {
-        "message": "Task deleted",
-        "id": task_id,
-    }
+    return task_service.delete_task(db, task_id)
