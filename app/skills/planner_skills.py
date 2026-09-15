@@ -24,8 +24,11 @@ def build_default_skills() -> SkillRegistry:
                 keywords=["安排", "规划", "排期"],
                 system_hint=(
                     "【日程规划】先 get_current_time 确定目标时间，再 get_tasks / get_events 了解现状，"
+                    "如果用户说某个任务「急 / 尽快 / 优先」，先用 get_tasks 按关键词找到它，"
+                    "再用 update_task 把 priority 改为 high，必要时设置 earliest_start 为当前时间；"
                     "然后调用 generate_plan 生成日程：用户指定了时间段（如「今天晚上」「明天下午」）时用 windows 参数，"
-                    "要求「留空闲 / 不要连续」时用 gap_minutes 参数。最后用自然语言解释结果。"
+                    "要求「留空闲 / 不要连续」时用 gap_minutes 参数（通常 30 到 60 分钟）。"
+                    "工具调用完成后必须停止继续调用工具，用自然语言总结结果。"
                 ),
             ),
             Skill(

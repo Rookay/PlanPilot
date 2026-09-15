@@ -31,6 +31,7 @@ const state = {
   schedules: [],
   weekStart: null,
   editingTaskId: null,
+  editingEventId: null,
   chatMessages: [],
   chatLoading: false,
   chatSessionId: null,
@@ -150,6 +151,15 @@ function getStatusName(status) {
   return map[status] || status;
 }
 
+function eventDurationText(event) {
+  const start = parseDate(event.start_time);
+  const end = parseDate(event.end_time);
+  if (!start || !end) {
+    return "";
+  }
+  return `${formatDateTime(event.start_time)} - ${formatTime(end)}`;
+}
+
 
 /* =========================
    网络请求
@@ -204,6 +214,8 @@ function showPage(pageName) {
 
   if (pageName === "tasks" || pageName === "dashboard") {
     loadTasks().catch(handleError);
+  } else if (pageName === "events") {
+    loadEvents().catch(handleError);
   } else if (pageName === "calendar" || pageName === "planning") {
     loadAllData()
       .then(() => {
@@ -239,6 +251,21 @@ async function loadTasks() {
   }
 }
 
+async function loadEvents() {
+  try {
+    state.events = await api("/events");
+    renderEvents();
+  } catch (error) {
+    const container = $("eventList");
+    if (container) {
+      container.innerHTML = `
+        <div class="empty error">加载事件失败：${escapeHtml(error.message)}</div>
+      `;
+    }
+    throw error;
+  }
+}
+
 async function loadAllData() {
   const [tasks, events, schedules] = await Promise.all([
     api("/tasks"),
@@ -251,6 +278,7 @@ async function loadAllData() {
   state.schedules = schedules;
 
   renderTasks();
+  renderEvents();
   renderDashboardTasks();
   updateDashboard();
   renderTimetables();
@@ -296,6 +324,17 @@ function renderTaskItem(task) {
   const startText = formatDateTime(task.start_time);
   if (startText) {
     meta.unshift(`开始：${startText}`);
+  }
+  const earliestText = formatDateTime(task.earliest_start);
+  if (earliestText) {
+    meta.push(`最早：${earliestText}`);
+  }
+  const deadlineText = formatDateTime(task.deadline);
+  if (deadlineText) {
+    meta.push(`截止：${deadlineText}`);
+  }
+  if (task.preferred_time) {
+    meta.push(`偏好：${task.preferred_time}`);
   }
   if (task.category) {
     meta.push(`分类：${task.category}`);
@@ -373,6 +412,8 @@ async function submitTask() {
   }
 
   const startValue = $("taskStartTime").value;
+  const earliestValue = $("taskEarliestStart").value;
+  const deadlineValue = $("taskDeadline").value;
 
   const data = {
     title,
@@ -380,6 +421,10 @@ async function submitTask() {
     estimated_duration: duration,
     priority: $("taskPriority").value,
     start_time: startValue ? new Date(startValue).toISOString() : null,
+    earliest_start: earliestValue ? new Date(earliestValue).toISOString() : null,
+    deadline: deadlineValue ? new Date(deadlineValue).toISOString() : null,
+    preferred_time: $("taskPreferredTime").value.trim() || null,
+    category: $("taskCategory").value.trim() || null,
   };
 
   try {
@@ -473,8 +518,12 @@ function openTaskModal(id = null) {
       $("taskTitle").value = task.title || "";
       $("taskDescription").value = task.description || "";
       $("taskStartTime").value = toDateTimeLocalValue(task.start_time);
+      $("taskEarliestStart").value = toDateTimeLocalValue(task.earliest_start);
+      $("taskDeadline").value = toDateTimeLocalValue(task.deadline);
       $("taskDuration").value = task.estimated_duration;
       $("taskPriority").value = task.priority;
+      $("taskPreferredTime").value = task.preferred_time || "";
+      $("taskCategory").value = task.category || "";
     }
   } else {
     $("modalTitle").textContent = "新建任务";
@@ -494,8 +543,158 @@ function clearTaskForm() {
   $("taskTitle").value = "";
   $("taskDescription").value = "";
   $("taskStartTime").value = "";
+  $("taskEarliestStart").value = "";
+  $("taskDeadline").value = "";
   $("taskDuration").value = 60;
   $("taskPriority").value = "medium";
+  $("taskPreferredTime").value = "";
+  $("taskCategory").value = "";
+}
+
+
+/* =========================
+   固定事件
+========================= */
+
+function renderEvents() {
+  const container = $("eventList");
+  if (!container) {
+    return;
+  }
+
+  if (state.events.length === 0) {
+    container.innerHTML = `
+      <div class="empty">还没有固定事件，添加会议、约会或通勤时间吧</div>
+    `;
+    return;
+  }
+
+  container.innerHTML = state.events.map(renderEventItem).join("");
+}
+
+function renderEventItem(event) {
+  const meta = [eventDurationText(event)];
+  if (event.location) {
+    meta.push(`地点：${event.location}`);
+  }
+
+  const description = event.description
+    ? `<div class="task-desc">${escapeHtml(event.description)}</div>`
+    : "";
+
+  return `
+    <div class="event">
+      <div class="task-main">
+        <div class="task-title">${escapeHtml(event.title)}</div>
+        <div class="task-info">${escapeHtml(meta.filter(Boolean).join(" · "))}</div>
+        ${description}
+      </div>
+
+      <div class="task-actions">
+        <button class="ghost-button" onclick="openEventModal(${event.id})">
+          编辑
+        </button>
+        <button class="delete-button" onclick="deleteEvent(${event.id})">
+          删除
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function openEventModal(id = null) {
+  state.editingEventId = id;
+
+  if (id) {
+    const event = state.events.find((item) => item.id === id);
+    if (event) {
+      $("eventModalTitle").textContent = "编辑事件";
+      $("eventSubmitButton").textContent = "保存修改";
+      $("eventTitle").value = event.title || "";
+      $("eventDescription").value = event.description || "";
+      $("eventStartTime").value = toDateTimeLocalValue(event.start_time);
+      $("eventEndTime").value = toDateTimeLocalValue(event.end_time);
+      $("eventLocation").value = event.location || "";
+    }
+  } else {
+    $("eventModalTitle").textContent = "新建事件";
+    $("eventSubmitButton").textContent = "创建事件";
+    clearEventForm();
+  }
+
+  $("eventModal").classList.remove("hidden");
+}
+
+function closeEventModal() {
+  $("eventModal").classList.add("hidden");
+  state.editingEventId = null;
+}
+
+function clearEventForm() {
+  $("eventTitle").value = "";
+  $("eventDescription").value = "";
+  $("eventStartTime").value = "";
+  $("eventEndTime").value = "";
+  $("eventLocation").value = "";
+}
+
+async function submitEvent() {
+  const title = $("eventTitle").value.trim();
+  const startValue = $("eventStartTime").value;
+  const endValue = $("eventEndTime").value;
+
+  if (!title) {
+    alert("请输入事件名称");
+    return;
+  }
+  if (!startValue || !endValue) {
+    alert("请选择开始和结束时间");
+    return;
+  }
+  if (new Date(endValue) <= new Date(startValue)) {
+    alert("结束时间必须晚于开始时间");
+    return;
+  }
+
+  const data = {
+    title,
+    description: $("eventDescription").value.trim() || null,
+    start_time: new Date(startValue).toISOString(),
+    end_time: new Date(endValue).toISOString(),
+    location: $("eventLocation").value.trim() || null,
+  };
+
+  try {
+    if (state.editingEventId) {
+      await api(`/events/${state.editingEventId}`, {
+        method: "PUT",
+        body: JSON.stringify(data),
+      });
+    } else {
+      await api("/events", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+    }
+
+    closeEventModal();
+    await loadAllData();
+  } catch (error) {
+    alert(`保存失败：${error.message}`);
+  }
+}
+
+async function deleteEvent(id) {
+  if (!confirm("确定删除这个固定事件吗？")) {
+    return;
+  }
+
+  try {
+    await api(`/events/${id}`, { method: "DELETE" });
+    await loadAllData();
+  } catch (error) {
+    alert(`删除失败：${error.message}`);
+  }
 }
 
 
@@ -508,9 +707,20 @@ async function generateSchedule() {
   container.innerHTML = `<div class="empty">正在规划…</div>`;
 
   try {
+    const startValue = $("planStart").value;
+    const days = Number($("planDays").value) || 7;
+    const gap = Number($("planGap").value) || 0;
+    const payload = {
+      days,
+      gap_minutes: gap,
+    };
+    if (startValue) {
+      payload.start = new Date(startValue).toISOString();
+    }
+
     const result = await api("/schedules/generate", {
       method: "POST",
-      body: JSON.stringify({ days: 7 }),
+      body: JSON.stringify(payload),
     });
 
     await loadAllData();

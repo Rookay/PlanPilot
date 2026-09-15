@@ -21,6 +21,7 @@
         <nav>
             <button onclick="showPage('dashboard')">仪表盘</button>
             <button onclick="showPage('tasks')">我的任务</button>
+            <button onclick="showPage('events')">固定事件</button>
             <button onclick="showPage('calendar')">日历</button>
             <button onclick="showPage('planning')">日程规划</button>
             <button onclick="showPage('chat')">对话助手</button>
@@ -92,6 +93,23 @@
         </section>
 
 
+        <!-- 固定事件 -->
+        <section id="events" class="page hidden">
+            <div class="page-header">
+                <div>
+                    <h2>固定事件</h2>
+                    <p>管理会议、约会和其它不能自动移动的时间块</p>
+                </div>
+
+                <button class="primary-button" onclick="openEventModal()">
+                    + 新建事件
+                </button>
+            </div>
+
+            <div id="eventList" class="event-list"></div>
+        </section>
+
+
         <!-- 日历 -->
         <section id="calendar" class="page hidden">
 
@@ -102,6 +120,7 @@
                 </div>
 
                 <div class="calendar-nav">
+                    <button class="primary-button" onclick="openEventModal()">+ 事件</button>
                     <button class="ghost-button" onclick="previousWeek()">‹ 上一周</button>
                     <span class="week-label"></span>
                     <button class="ghost-button" onclick="goToday()">今天</button>
@@ -180,6 +199,21 @@
             </div>
 
             <div class="planning-actions">
+                <label>
+                    起始时间
+                    <input id="planStart" type="datetime-local">
+                </label>
+
+                <label>
+                    天数
+                    <input id="planDays" type="number" min="1" max="30" value="7">
+                </label>
+
+                <label>
+                    间隔（分钟）
+                    <input id="planGap" type="number" min="0" max="240" value="0">
+                </label>
+
                 <button class="primary-button" onclick="generateSchedule()">
                     开始规划
                 </button>
@@ -232,6 +266,20 @@
                 type="datetime-local">
         </label>
 
+        <label>
+            最早可开始
+            <input
+                id="taskEarliestStart"
+                type="datetime-local">
+        </label>
+
+        <label>
+            截止时间
+            <input
+                id="taskDeadline"
+                type="datetime-local">
+        </label>
+
 
         <label>
             持续时间（分钟）
@@ -253,6 +301,22 @@
             </select>
         </label>
 
+        <label>
+            偏好时间
+            <input
+                id="taskPreferredTime"
+                type="text"
+                placeholder="例如：上午、下午、09:00">
+        </label>
+
+        <label>
+            分类
+            <input
+                id="taskCategory"
+                type="text"
+                placeholder="例如：学习 / 工作 / 生活">
+        </label>
+
 
         <div class="modal-buttons">
 
@@ -265,6 +329,67 @@
                 class="primary-button"
                 onclick="submitTask()">
                 创建任务
+            </button>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- 新建 / 编辑事件弹窗 -->
+
+<div id="eventModal" class="modal hidden">
+
+    <div class="modal-content">
+
+        <h2 id="eventModalTitle">新建事件</h2>
+
+        <label>
+            事件名称
+            <input
+                id="eventTitle"
+                type="text"
+                placeholder="例如：项目会议">
+        </label>
+
+        <label>
+            描述
+            <textarea
+                id="eventDescription"
+                placeholder="事件描述"></textarea>
+        </label>
+
+        <label>
+            开始时间
+            <input id="eventStartTime" type="datetime-local">
+        </label>
+
+        <label>
+            结束时间
+            <input id="eventEndTime" type="datetime-local">
+        </label>
+
+        <label>
+            地点
+            <input
+                id="eventLocation"
+                type="text"
+                placeholder="例如：公司 / 线上会议">
+        </label>
+
+        <div class="modal-buttons">
+
+            <button onclick="closeEventModal()">
+                取消
+            </button>
+
+            <button
+                id="eventSubmitButton"
+                class="primary-button"
+                onclick="submitEvent()">
+                创建事件
             </button>
 
         </div>

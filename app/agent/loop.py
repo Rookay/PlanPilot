@@ -13,6 +13,7 @@ from app.agent.confirmation import PendingActionStore
 from app.agent.context import build_system_prompt, build_world_summary
 from app.agent.memory import Memory
 from app.llm.base import LLMProvider
+from app.llm.mock import MockProvider
 from app.skills.base import SkillRegistry
 from app.tools.registry import ToolRegistry
 
@@ -63,9 +64,27 @@ class AgentLoop:
         applied_changes: List[dict] = []
         proposed_schedules: List[dict] = []
         tool_call_count = 0
+        seen_calls: set[str] = set()
 
         for _ in range(self.MAX_ITERATIONS):
-            response = self.llm.chat(messages, tools=self.registry.schemas())
+            try:
+                response = self.llm.chat(messages, tools=self.registry.schemas())
+            except Exception as exc:  # noqa: BLE001
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "真实模型暂时不可用，已切换到本地规则模式。"
+                            f"错误摘要：{exc}"
+                        ),
+                    }
+                )
+                response = MockProvider(
+                    fixed_text=(
+                        "真实模型暂时连接不上，我先用本地规则模式处理。"
+                        "你可以继续使用任务查询、自动规划、冲突检查等基础能力。"
+                    )
+                ).chat(messages, tools=self.registry.schemas())
 
             if response.is_text() or not response.tool_calls:
                 reply = response.text or "（模型未返回内容）"
@@ -86,10 +105,23 @@ class AgentLoop:
 
             for call in response.tool_calls:
                 tool = self.registry.get(call.name)
+                call_key = self._call_key(call.name, call.arguments)
 
                 if tool is None:
                     messages.append(self._tool_message(call.id, call.name, False, f"unknown tool: {call.name}"))
                     continue
+
+                if call_key in seen_calls:
+                    reply = self._progress_reply(tool_call_log, proposed_schedules)
+                    self.memory.add(session_id, "assistant", reply)
+                    return AgentResult(
+                        reply=reply,
+                        session_id=session_id,
+                        tool_calls=tool_call_log,
+                        applied_changes=applied_changes,
+                        proposed_schedules=proposed_schedules,
+                    )
+                seen_calls.add(call_key)
 
                 # confirm 级别：先暂停询问用户。
                 if tool.confirmation == "confirm":
@@ -150,16 +182,20 @@ class AgentLoop:
                 )
 
             if tool_call_count >= self.MAX_TOOL_CALLS:
+                reply = self._progress_reply(tool_call_log, proposed_schedules)
+                self.memory.add(session_id, "assistant", reply)
                 return AgentResult(
-                    reply="已达到最大工具调用次数，请更具体地描述需求。",
+                    reply=reply,
                     session_id=session_id,
                     tool_calls=tool_call_log,
                     applied_changes=applied_changes,
                     proposed_schedules=proposed_schedules,
                 )
 
+        reply = self._progress_reply(tool_call_log, proposed_schedules)
+        self.memory.add(session_id, "assistant", reply)
         return AgentResult(
-            reply="达到最大推理步数，请重新描述需求。",
+            reply=reply,
             session_id=session_id,
             tool_calls=tool_call_log,
             applied_changes=applied_changes,
@@ -202,6 +238,35 @@ class AgentLoop:
                 for call in (response.tool_calls or [])
             ],
         }
+
+    @staticmethod
+    def _call_key(name: str, arguments: dict) -> str:
+        return json.dumps(
+            {"name": name, "arguments": arguments or {}},
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+
+    @staticmethod
+    def _progress_reply(tool_call_log: List[dict], proposed_schedules: List[dict]) -> str:
+        if not tool_call_log:
+            return "我还没能完成这次处理。可以换一句更具体的话再试，比如「把写论文设为高优先级，并重新规划未来 7 天，任务间隔 30 分钟」。"
+
+        summaries = [
+            item.get("summary")
+            for item in tool_call_log
+            if item.get("success") and item.get("summary")
+        ]
+        if proposed_schedules:
+            return (
+                "我已经执行了相关操作，并生成了新的待确认日程。"
+                f"本次共生成 {len(proposed_schedules)} 条日程；"
+                "你可以到「日程规划」或「日历」里查看并确认。"
+            )
+        if summaries:
+            return "我已经执行到这里：" + "；".join(summaries[-4:])
+        return "我尝试处理了这次请求，但工具没有返回可用结果，请稍微换一种说法再试。"
 
     @staticmethod
     def _tool_message(tool_call_id, name, success, summary=None, data=None, error=None) -> dict:

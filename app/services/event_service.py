@@ -10,10 +10,24 @@ from sqlalchemy.orm import Session
 
 from app.models.event import Event
 from app.schemas.event import EventCreate, EventUpdate
+from app.utils import to_naive_utc
+
+
+def _normalize_event_times(data: dict) -> dict:
+    for field in ("start_time", "end_time"):
+        if field in data:
+            data[field] = to_naive_utc(data[field])
+    return data
+
+
+def _validate_time_range(event: Event) -> None:
+    if event.end_time <= event.start_time:
+        raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
 
 
 def create_event(db: Session, data: EventCreate) -> Event:
-    event = Event(**data.model_dump())
+    event = Event(**_normalize_event_times(data.model_dump()))
+    _validate_time_range(event)
     db.add(event)
     db.commit()
     db.refresh(event)
@@ -36,9 +50,11 @@ def get_event(db: Session, event_id: int) -> Event:
 def update_event(db: Session, event_id: int, data: EventUpdate) -> Event:
     event = get_event(db, event_id)
 
-    update_data = data.model_dump(exclude_unset=True)
+    update_data = _normalize_event_times(data.model_dump(exclude_unset=True))
     for key, value in update_data.items():
         setattr(event, key, value)
+
+    _validate_time_range(event)
 
     db.commit()
     db.refresh(event)

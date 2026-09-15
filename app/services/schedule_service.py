@@ -53,6 +53,15 @@ def create_schedule(
     end_time: datetime,
     status: str = "proposed",
 ) -> Schedule:
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    start_time = to_naive_utc(start_time)
+    end_time = to_naive_utc(end_time)
+    if start_time is None or end_time is None or end_time <= start_time:
+        raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
+
     schedule = Schedule(
         task_id=task_id,
         start_time=start_time,
@@ -160,11 +169,20 @@ def update_schedule(db: Session, schedule_id: int, payload: ScheduleUpdate) -> S
         raise HTTPException(status_code=404, detail="Schedule not found")
 
     update_data: Dict = payload.model_dump(exclude_unset=True)
+    for key in ("start_time", "end_time"):
+        if key in update_data:
+            update_data[key] = to_naive_utc(update_data[key])
+
     for key, value in update_data.items():
         setattr(schedule, key, value)
 
     if schedule.end_time <= schedule.start_time:
         raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
+
+    if update_data.get("status") == "completed":
+        task = db.query(Task).filter(Task.id == schedule.task_id).first()
+        if task is not None:
+            task.status = "completed"
 
     db.commit()
     db.refresh(schedule)
