@@ -4,7 +4,7 @@
 # IDE     ：PyCharm 
 # Author  ：刘景涛
 # Date    ：2026/9/11 14:11
-from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from app.database import Base
 from app.utils import utcnow
@@ -28,10 +28,37 @@ class Event(Base):
         nullable=False,
     )
 
+    event_type = Column(
+        String(20),
+        nullable=False,
+        default="activity",
+    )
+
     location = Column(
         String(200),
         nullable=True,
     )
+
+    location_id = Column(
+        Integer,
+        ForeignKey("saved_locations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    location_city = Column(String(100), nullable=True)
+    location_longitude = Column(Float, nullable=True)
+    location_latitude = Column(Float, nullable=True)
+
+    origin_location = Column(String(200), nullable=True)
+    origin_location_id = Column(
+        Integer,
+        ForeignKey("saved_locations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    origin_location_city = Column(String(100), nullable=True)
+    origin_location_longitude = Column(Float, nullable=True)
+    origin_location_latitude = Column(Float, nullable=True)
 
     created_at = Column(
         DateTime,

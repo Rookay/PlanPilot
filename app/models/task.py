@@ -4,7 +4,7 @@
 # IDE     ：PyCharm 
 # Author  ：刘景涛
 # Date    ：2026/9/11 14:10
-from sqlalchemy import Column, DateTime, Integer, String, Text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from app.database import Base
 from app.utils import utcnow
@@ -50,6 +50,17 @@ class Task(Base):
         String(50),
         nullable=True,
     )
+
+    location_id = Column(
+        Integer,
+        ForeignKey("saved_locations.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    location = Column(String(200), nullable=True)
+    location_city = Column(String(100), nullable=True)
+    location_longitude = Column(Float, nullable=True)
+    location_latitude = Column(Float, nullable=True)
 
     created_at = Column(
         DateTime,

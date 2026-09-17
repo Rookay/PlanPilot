@@ -15,7 +15,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Set, Tuple
 
 # 时间粒度（分钟）：所有自动生成的日程都会对齐到该粒度。
 SLOT_MINUTES = 15
@@ -40,6 +40,7 @@ class PlanTask:
     earliest_start: Optional[datetime] = None
     deadline: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    preferred_windows: List[Tuple[datetime, datetime]] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +50,7 @@ class PlanAssignment:
     task_id: int
     start_time: datetime
     end_time: datetime
+    reason: str = ""
 
 
 @dataclass
@@ -126,47 +128,64 @@ def _find_free_slot(
     duration: timedelta,
     earliest: datetime,
     deadline: Optional[datetime],
+    candidate_is_valid: Optional[Callable[[datetime, datetime], bool]] = None,
 ) -> Optional[datetime]:
-    """在窗口内寻找第一个足够长的空闲时段。"""
+    """在窗口内寻找第一个满足时间与附加约束的空闲时段。"""
 
     for window_start, window_end in windows:
         cursor = _ceil_to_slot(max(window_start, earliest))
-        if cursor >= window_end:
-            continue
-
-        for busy_start, busy_end in busy:
-            if busy_end <= cursor:
-                continue
-            if busy_start >= window_end:
-                break
-            if cursor + duration <= busy_start:
-                break
-            cursor = _ceil_to_slot(max(cursor, busy_end))
-            if cursor >= window_end:
-                break
-
-        if cursor + duration <= window_end:
-            if deadline is not None and cursor + duration > deadline:
-                # 窗口按时间递增，后面的窗口只会更晚，直接判定无法安排。
+        while cursor + duration <= window_end:
+            slot_end = cursor + duration
+            if deadline is not None and slot_end > deadline:
+                # 窗口按时间递增，后面的候选只会更晚。
                 return None
-            return cursor
+
+            overlapping_end = next(
+                (
+                    busy_end
+                    for busy_start, busy_end in busy
+                    if busy_end > cursor and busy_start < slot_end
+                ),
+                None,
+            )
+            if overlapping_end is not None:
+                cursor = _ceil_to_slot(overlapping_end)
+                continue
+
+            if candidate_is_valid is None or candidate_is_valid(cursor, slot_end):
+                return cursor
+            cursor += timedelta(minutes=SLOT_MINUTES)
 
     return None
 
 
-def _sort_key(task: PlanTask):
-    """排序规则：先按开始时间，再按截止时间、优先级、创建时间。"""
+def _sort_key(task: PlanTask, strategy: str = "balanced"):
+    """按固定时间、用户选择的策略和创建时间稳定排序。"""
 
     start = task.start_time or task.earliest_start
     deadline = task.deadline
-    return (
-        start is None,
-        start or datetime.max,
-        deadline is None,
-        deadline or datetime.max,
-        PRIORITY_WEIGHT.get(task.priority, 1),
-        task.created_at or datetime.min,
-    )
+    fixed = (start is None, start or datetime.max)
+    priority = PRIORITY_WEIGHT.get(task.priority, 1)
+    due = (deadline is None, deadline or datetime.max)
+    if strategy == "deadline_first":
+        order = (*fixed, *due, priority)
+    else:
+        # balanced 与 priority_first 都先保护高优先级，再在同级内照顾截止时间。
+        order = (*fixed, priority, *due)
+    return (*order, task.created_at or datetime.min)
+
+
+def _intersect_windows(
+    first: Sequence[Tuple[datetime, datetime]],
+    second: Sequence[Tuple[datetime, datetime]],
+) -> List[Tuple[datetime, datetime]]:
+    intersections: List[Tuple[datetime, datetime]] = []
+    for first_start, first_end in first:
+        for second_start, second_end in second:
+            start, end = max(first_start, second_start), min(first_end, second_end)
+            if end > start:
+                intersections.append((start, end))
+    return sorted(intersections)
 
 
 def generate_plan(
@@ -180,6 +199,10 @@ def generate_plan(
     day_end: time = DEFAULT_DAY_END,
     windows: Optional[List[Tuple[datetime, datetime]]] = None,
     gap_minutes: int = 0,
+    strategy: str = "balanced",
+    candidate_validator: Optional[
+        Callable[[PlanTask, datetime, datetime, Sequence[PlanAssignment]], bool]
+    ] = None,
 ) -> PlanResult:
     """贪心排期。
 
@@ -193,6 +216,7 @@ def generate_plan(
         day_end: 每天可安排的最晚时间。
         windows: 显式指定可安排的时间窗口；传入后优先于 start/days/day_start/day_end。
         gap_minutes: 相邻任务之间的最小空闲间隔（分钟）。
+        candidate_validator: 可选的候选时段校验器，用于通勤等跨事项约束。
 
     Returns:
         PlanResult：成功安排的任务 + 未能安排的任务及原因。
@@ -221,7 +245,7 @@ def generate_plan(
     busy = _merge_intervals(busy)
 
     gap = timedelta(minutes=max(gap_minutes, 0))
-    ordered = sorted(tasks, key=_sort_key)
+    ordered = sorted(tasks, key=lambda task: _sort_key(task, strategy))
 
     assignments: List[PlanAssignment] = []
     failures: List[PlanFailure] = []
@@ -239,12 +263,34 @@ def generate_plan(
             )
             continue
 
-        slot_start = _find_free_slot(
+        preferred_windows = _intersect_windows(planning_windows, task.preferred_windows)
+        validate_candidate = (
+            None
+            if candidate_validator is None
+            else lambda slot_start, slot_end: candidate_validator(
+                task, slot_start, slot_end, assignments
+            )
+        )
+        slot_start = None
+        used_preference = False
+        if preferred_windows:
+            slot_start = _find_free_slot(
+                windows=preferred_windows,
+                busy=busy,
+                duration=duration,
+                earliest=max(earliest, horizon_start),
+                deadline=task.deadline,
+                candidate_is_valid=validate_candidate,
+            )
+            used_preference = slot_start is not None
+
+        slot_start = slot_start or _find_free_slot(
             windows=planning_windows,
             busy=busy,
             duration=duration,
             earliest=max(earliest, horizon_start),
             deadline=task.deadline,
+            candidate_is_valid=validate_candidate,
         )
 
         if slot_start is None:
@@ -257,12 +303,23 @@ def generate_plan(
             )
             continue
 
+        priority_labels = {"high": "高优先级", "medium": "中优先级", "low": "低优先级"}
+        reason_parts = [priority_labels.get(task.priority, "中优先级")]
+        if task.deadline is not None:
+            reason_parts.append("已考虑截止时间")
+        if used_preference:
+            reason_parts.append("符合偏好时段")
         assignments.append(
-            PlanAssignment(task.id, slot_start, slot_start + duration)
+            PlanAssignment(
+                task.id,
+                slot_start,
+                slot_start + duration,
+                " · ".join(reason_parts),
+            )
         )
-        # 留出任务之间的空闲间隔。
+        # 双向保护任务间隔：后续任务无论排在它之前还是之后都不会贴在一起。
         busy = _merge_intervals(
-            busy + [(slot_start, slot_start + duration + gap)]
+            busy + [(slot_start - gap, slot_start + duration + gap)]
         )
 
     return PlanResult(assignments=assignments, failures=failures)
@@ -298,6 +355,9 @@ class Evaluation:
 
     score: int  # 0-100
     issues: List[str]
+    scheduled_count: int = 0
+    unscheduled_count: int = 0
+    scheduled_minutes: int = 0
 
 
 def find_free_slots(
@@ -308,15 +368,18 @@ def find_free_slots(
     day_start: time = DEFAULT_DAY_START,
     day_end: time = DEFAULT_DAY_END,
     min_duration: timedelta = timedelta(minutes=SLOT_MINUTES),
+    windows: Optional[List[Tuple[datetime, datetime]]] = None,
 ) -> List[Tuple[datetime, datetime]]:
     """找出所有满足最短时长的空闲时间段（按时间升序）。"""
 
-    windows = _build_windows(start, days, day_start, day_end)
-    if not windows:
+    planning_windows = sorted(windows) if windows is not None else _build_windows(
+        start, days, day_start, day_end
+    )
+    if not planning_windows:
         return []
 
-    horizon_start = windows[0][0]
-    horizon_end = windows[-1][1]
+    horizon_start = planning_windows[0][0]
+    horizon_end = planning_windows[-1][1]
 
     busy = [
         (interval_start, interval_end)
@@ -327,7 +390,7 @@ def find_free_slots(
 
     slots: List[Tuple[datetime, datetime]] = []
 
-    for window_start, window_end in windows:
+    for window_start, window_end in planning_windows:
         cursor = _ceil_to_slot(window_start)
         if cursor >= window_end:
             continue
@@ -385,7 +448,7 @@ def evaluate_plan(
 
     for failure in failures:
         issues.append(f"{failure.title}: {failure.reason}")
-        score -= 10
+        score -= max(8, 40 // max(len(assignments) + len(failures), 1))
 
     for assignment in assignments:
         task = tasks_by_id.get(assignment.task_id)
@@ -400,4 +463,14 @@ def evaluate_plan(
             score -= 20
 
     score = max(0, min(100, score))
-    return Evaluation(score=score, issues=issues)
+    scheduled_minutes = sum(
+        int((item.end_time - item.start_time).total_seconds() // 60)
+        for item in assignments
+    )
+    return Evaluation(
+        score=score,
+        issues=issues,
+        scheduled_count=len(assignments),
+        unscheduled_count=len(failures),
+        scheduled_minutes=scheduled_minutes,
+    )

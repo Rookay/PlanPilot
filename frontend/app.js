@@ -8,14 +8,14 @@
 const API_URL =
   window.API_URL ||
   (() => {
-    const { protocol, hostname } = window.location;
+    const { protocol, hostname, origin, port } = window.location;
 
     // 用 file:// 直接双击打开页面时没有 hostname，退回本机地址。
     if (protocol === "file:" || !hostname) {
       return "http://127.0.0.1:8000/api";
     }
 
-    return `${protocol}//${hostname}:8000/api`;
+    return port === "8000" ? `${origin}/api` : `${protocol}//${hostname}:8000/api`;
   })();
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -36,7 +36,29 @@ const state = {
   chatLoading: false,
   chatSessionId: null,
   chatPendingConfirmation: null,
+  preferences: null,
+  locations: [],
+  modalLocationCandidates: { task: [], event: [], eventOrigin: [] },
+  editingLocationId: null,
+  itinerary: null,
+  itineraryMap: null,
+  itineraryMarkers: new Map(),
+  itineraryRoutes: new Map(),
+  itineraryInfoWindow: null,
+  calendarDetailMap: null,
+  calendarDetailEdit: null,
+  mapClientConfig: null,
+  mapLoadPromise: null,
+  lastPlanBatchId: null,
+  chatLoaded: false,
 };
+
+state.chatSessionId =
+  localStorage.getItem("planpilot_session_id") ||
+  (window.crypto && crypto.randomUUID
+    ? crypto.randomUUID().replace(/-/g, "")
+    : `session_${Date.now()}`);
+localStorage.setItem("planpilot_session_id", state.chatSessionId);
 
 
 /* =========================
@@ -212,6 +234,10 @@ function showPage(pageName) {
     target.classList.remove("hidden");
   }
 
+  document.querySelectorAll(".sidebar nav button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.page === pageName);
+  });
+
   if (pageName === "tasks" || pageName === "dashboard") {
     loadTasks().catch(handleError);
   } else if (pageName === "events") {
@@ -224,8 +250,12 @@ function showPage(pageName) {
         }
       })
       .catch(handleError);
+  } else if (pageName === "itinerary") {
+    loadItinerary().catch(handleError);
   } else if (pageName === "chat") {
-    renderChatMessages();
+    Promise.all([loadChatHistory(), loadAgentStatus()]).catch(handleError);
+  } else if (pageName === "settings") {
+    Promise.all([loadPreferences(), loadLocations()]).catch(handleError);
   }
 }
 
@@ -259,7 +289,7 @@ async function loadEvents() {
     const container = $("eventList");
     if (container) {
       container.innerHTML = `
-        <div class="empty error">加载事件失败：${escapeHtml(error.message)}</div>
+        <div class="empty error">加载固定行程失败：${escapeHtml(error.message)}</div>
       `;
     }
     throw error;
@@ -281,6 +311,7 @@ async function loadAllData() {
   renderEvents();
   renderDashboardTasks();
   updateDashboard();
+  renderDashboardSchedules();
   renderTimetables();
 }
 
@@ -300,16 +331,52 @@ function renderTasks() {
     return;
   }
 
-  if (state.tasks.length === 0) {
+  const tasks = getFilteredTasks();
+  if (tasks.length === 0) {
     container.innerHTML = `
       <div class="empty">
-        暂时没有任务，点击「+ 新建任务」开始吧
+        没有符合当前条件的任务
       </div>
     `;
     return;
   }
 
-  container.innerHTML = state.tasks.map(renderTaskItem).join("");
+  container.innerHTML = tasks.map(renderTaskItem).join("");
+}
+
+function getFilteredTasks() {
+  const search = ($("taskSearch")?.value || "").trim().toLowerCase();
+  const status = $("taskStatusFilter")?.value || "";
+  const priority = $("taskPriorityFilter")?.value || "";
+  const sort = $("taskSort")?.value || "created_desc";
+
+  const tasks = state.tasks.filter((task) => {
+    const matchesSearch =
+      !search ||
+      `${task.title || ""} ${task.description || ""} ${task.category || ""}`
+        .toLowerCase()
+        .includes(search);
+    return (
+      matchesSearch &&
+      (!status || task.status === status) &&
+      (!priority || task.priority === priority)
+    );
+  });
+
+  const valueOfDeadline = (task) => parseDate(task.deadline)?.getTime() ?? Infinity;
+  const comparators = {
+    deadline_asc: (a, b) => valueOfDeadline(a) - valueOfDeadline(b),
+    duration_asc: (a, b) => a.estimated_duration - b.estimated_duration,
+    title_asc: (a, b) => a.title.localeCompare(b.title, "zh-CN"),
+  };
+  if (comparators[sort]) {
+    tasks.sort(comparators[sort]);
+  }
+  return tasks;
+}
+
+function applyTaskFilters() {
+  renderTasks();
 }
 
 function renderTaskItem(task) {
@@ -338,6 +405,10 @@ function renderTaskItem(task) {
   }
   if (task.category) {
     meta.push(`分类：${task.category}`);
+  }
+  const taskLocation = locationById(task.location_id);
+  if (taskLocation || task.location) {
+    meta.push(`地点：${taskLocation?.label || task.location}`);
   }
 
   const description = task.description
@@ -398,6 +469,26 @@ function renderDashboardTasks() {
     .join("");
 }
 
+function renderDashboardSchedules() {
+  const container = $("dashboardScheduleList");
+  if (!container) {
+    return;
+  }
+  const now = new Date();
+  const upcoming = state.schedules
+    .filter(
+      (item) =>
+        ["proposed", "accepted"].includes(item.status) &&
+        parseDate(item.end_time) > now
+    )
+    .slice(0, 4);
+  if (!upcoming.length) {
+    container.innerHTML = `<div class="empty">还没有即将开始的日程</div>`;
+    return;
+  }
+  container.innerHTML = upcoming.map(renderScheduleItem).join("");
+}
+
 async function submitTask() {
   const title = $("taskTitle").value.trim();
   if (!title) {
@@ -415,6 +506,11 @@ async function submitTask() {
   const earliestValue = $("taskEarliestStart").value;
   const deadlineValue = $("taskDeadline").value;
 
+  const location = modalLocationPayload("task");
+  if (!location) {
+    return;
+  }
+
   const data = {
     title,
     description: $("taskDescription").value.trim() || null,
@@ -425,6 +521,7 @@ async function submitTask() {
     deadline: deadlineValue ? new Date(deadlineValue).toISOString() : null,
     preferred_time: $("taskPreferredTime").value.trim() || null,
     category: $("taskCategory").value.trim() || null,
+    ...location,
   };
 
   try {
@@ -524,6 +621,8 @@ function openTaskModal(id = null) {
       $("taskPriority").value = task.priority;
       $("taskPreferredTime").value = task.preferred_time || "";
       $("taskCategory").value = task.category || "";
+      $("taskLocationId").value = task.location_id || "";
+      setModalLocationFields("task", task);
     }
   } else {
     $("modalTitle").textContent = "新建任务";
@@ -545,15 +644,16 @@ function clearTaskForm() {
   $("taskStartTime").value = "";
   $("taskEarliestStart").value = "";
   $("taskDeadline").value = "";
-  $("taskDuration").value = 60;
+  $("taskDuration").value = state.preferences?.default_task_duration_min || 60;
   $("taskPriority").value = "medium";
   $("taskPreferredTime").value = "";
   $("taskCategory").value = "";
+  clearModalLocation("task");
 }
 
 
 /* =========================
-   固定事件
+   固定行程
 ========================= */
 
 function renderEvents() {
@@ -564,7 +664,7 @@ function renderEvents() {
 
   if (state.events.length === 0) {
     container.innerHTML = `
-      <div class="empty">还没有固定事件，添加会议、约会或通勤时间吧</div>
+      <div class="empty">还没有固定行程，添加会议、预约或车次吧</div>
     `;
     return;
   }
@@ -574,8 +674,15 @@ function renderEvents() {
 
 function renderEventItem(event) {
   const meta = [eventDurationText(event)];
-  if (event.location) {
-    meta.push(`地点：${event.location}`);
+  const savedLocation = locationById(event.location_id);
+  const savedOrigin = locationById(event.origin_location_id);
+  if (event.event_type === "travel") {
+    meta.push("类型：赶路");
+    const origin = savedOrigin?.label || event.origin_location || "继承上一地点";
+    const destination = savedLocation?.label || event.location || "未指定目的地";
+    meta.push(`路线：${origin} → ${destination}`);
+  } else if (savedLocation || event.location) {
+    meta.push(`地点：${savedLocation?.label || event.location}`);
   }
 
   const description = event.description
@@ -585,7 +692,7 @@ function renderEventItem(event) {
   return `
     <div class="event">
       <div class="task-main">
-        <div class="task-title">${escapeHtml(event.title)}</div>
+        <div class="task-title"><span class="kind-badge fixed-kind">固定</span>${escapeHtml(event.title)}</div>
         <div class="task-info">${escapeHtml(meta.filter(Boolean).join(" · "))}</div>
         ${description}
       </div>
@@ -608,18 +715,25 @@ function openEventModal(id = null) {
   if (id) {
     const event = state.events.find((item) => item.id === id);
     if (event) {
-      $("eventModalTitle").textContent = "编辑事件";
+      $("eventModalTitle").textContent = "编辑固定行程";
       $("eventSubmitButton").textContent = "保存修改";
       $("eventTitle").value = event.title || "";
       $("eventDescription").value = event.description || "";
       $("eventStartTime").value = toDateTimeLocalValue(event.start_time);
       $("eventEndTime").value = toDateTimeLocalValue(event.end_time);
-      $("eventLocation").value = event.location || "";
+      $("eventType").value = event.event_type || "activity";
+      setModalLocationFields("event", event);
+      setModalLocationFields("eventOrigin", event);
+      toggleEventLocationMode();
+      $("eventRecurrence").value = "";
+      $("eventRecurrence").disabled = true;
+      toggleRecurrenceFields();
     }
   } else {
-    $("eventModalTitle").textContent = "新建事件";
-    $("eventSubmitButton").textContent = "创建事件";
+    $("eventModalTitle").textContent = "新建固定行程";
+    $("eventSubmitButton").textContent = "创建固定行程";
     clearEventForm();
+    $("eventRecurrence").disabled = false;
   }
 
   $("eventModal").classList.remove("hidden");
@@ -635,7 +749,26 @@ function clearEventForm() {
   $("eventDescription").value = "";
   $("eventStartTime").value = "";
   $("eventEndTime").value = "";
-  $("eventLocation").value = "";
+  $("eventType").value = "activity";
+  clearModalLocation("event");
+  clearModalLocation("eventOrigin");
+  toggleEventLocationMode();
+  $("eventRecurrence").value = "";
+  $("eventOccurrences").value = 4;
+  toggleRecurrenceFields();
+}
+
+function toggleRecurrenceFields() {
+  const repeated = Boolean($("eventRecurrence")?.value);
+  $("eventOccurrencesLabel")?.classList.toggle("hidden", !repeated);
+}
+
+function toggleEventLocationMode() {
+  const isTravel = $("eventType")?.value === "travel";
+  $("eventOriginLocationEditor")?.classList.toggle("hidden", !isTravel);
+  if ($("eventDestinationHeading")) {
+    $("eventDestinationHeading").textContent = isTravel ? "目的地" : "地点";
+  }
 }
 
 async function submitEvent() {
@@ -644,7 +777,7 @@ async function submitEvent() {
   const endValue = $("eventEndTime").value;
 
   if (!title) {
-    alert("请输入事件名称");
+    alert("请输入行程名称");
     return;
   }
   if (!startValue || !endValue) {
@@ -656,13 +789,33 @@ async function submitEvent() {
     return;
   }
 
+  const location = modalLocationPayload("event");
+  if (!location) {
+    return;
+  }
+  const isTravel = $("eventType").value === "travel";
+  const originLocation = isTravel
+    ? modalLocationPayload("eventOrigin")
+    : emptyModalLocationPayload("origin_location");
+  if (!originLocation) {
+    return;
+  }
+
   const data = {
     title,
     description: $("eventDescription").value.trim() || null,
     start_time: new Date(startValue).toISOString(),
     end_time: new Date(endValue).toISOString(),
-    location: $("eventLocation").value.trim() || null,
+    event_type: $("eventType").value,
+    ...location,
+    ...originLocation,
   };
+
+  const recurrence = $("eventRecurrence").value;
+  if (!state.editingEventId && recurrence) {
+    data.recurrence = recurrence;
+    data.occurrences = Number($("eventOccurrences").value) || 4;
+  }
 
   try {
     if (state.editingEventId) {
@@ -671,7 +824,7 @@ async function submitEvent() {
         body: JSON.stringify(data),
       });
     } else {
-      await api("/events", {
+      await api(recurrence ? "/events/series" : "/events", {
         method: "POST",
         body: JSON.stringify(data),
       });
@@ -685,7 +838,7 @@ async function submitEvent() {
 }
 
 async function deleteEvent(id) {
-  if (!confirm("确定删除这个固定事件吗？")) {
+  if (!confirm("确定删除这个固定行程吗？")) {
     return;
   }
 
@@ -699,6 +852,365 @@ async function deleteEvent(id) {
 
 
 /* =========================
+   一日行程地图
+========================= */
+
+function localDateInputValue(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function setItineraryToday() {
+  $("itineraryDate").value = localDateInputValue();
+  loadItinerary().catch(handleError);
+}
+
+async function loadItinerary() {
+  const dateInput = $("itineraryDate");
+  if (!dateInput) {
+    return;
+  }
+  if (!dateInput.value) {
+    dateInput.value = localDateInputValue();
+  }
+  const mode = $("itineraryMode").value;
+  const includeReturn = $("itineraryReturn").checked;
+  const carAvailable = $("itineraryCar").checked;
+  const parkingMinutes = Math.max(0, Math.min(60, Number($("itineraryParking").value) || 0));
+  $("itineraryTimeline").innerHTML = '<div class="itinerary-empty">正在整理行程...</div>';
+  try {
+    state.itinerary = await api(
+      `/itineraries/day?date=${encodeURIComponent(dateInput.value)}&mode=${encodeURIComponent(mode)}&include_return=${includeReturn}&car_available=${carAvailable}&parking_minutes=${parkingMinutes}`,
+    );
+    renderItineraryTimeline();
+    await renderItineraryMap();
+  } catch (error) {
+    $("itineraryTimeline").innerHTML =
+      `<div class="itinerary-empty error">加载失败：${escapeHtml(error.message)}</div>`;
+    showMapFallback("暂时无法加载行程地图");
+  }
+}
+
+function renderItineraryTimeline() {
+  const itinerary = state.itinerary;
+  const container = $("itineraryTimeline");
+  const warningBox = $("itineraryWarnings");
+  if (!itinerary || !container) {
+    return;
+  }
+
+  if (itinerary.warnings.length) {
+    warningBox.innerHTML = itinerary.warnings
+      .map((warning) => `<div>${escapeHtml(warning)}</div>`)
+      .join("");
+    warningBox.classList.remove("hidden");
+  } else {
+    warningBox.classList.add("hidden");
+  }
+
+  if (!itinerary.items.length) {
+    container.innerHTML = '<div class="itinerary-empty">这一天还没有固定行程或任务安排</div>';
+    return;
+  }
+
+  const legsByDestination = new Map(
+    itinerary.legs.map((leg) => [leg.destination_id, leg]),
+  );
+  const rows = [];
+  if (itinerary.origin) {
+    rows.push(`
+      <div class="itinerary-origin">
+        <span class="itinerary-pin origin-pin">起</span>
+        <div><strong>${escapeHtml(itinerary.origin.label)}</strong><small>默认出发点</small></div>
+      </div>
+    `);
+  }
+
+  itinerary.items.forEach((item, index) => {
+    const leg = legsByDestination.get(item.id);
+    if (leg) {
+      const routeText = leg.duration_minutes === null
+        ? "路线待计算"
+        : leg.duration_minutes === 0
+          ? "同一地点，无需移动"
+          : `${travelModeName(leg.mode)} ${leg.duration_minutes} 分钟${leg.parking_minutes ? `（含停车 ${leg.parking_minutes} 分钟）` : ""}${leg.distance_m === null ? "" : ` · ${formatDistance(leg.distance_m)}`}`;
+      const departText = leg.suggested_departure
+        ? `建议 ${formatTime(parseDate(leg.suggested_departure))} 出发`
+        : "";
+      const carText = leg.car_location_after && itinerary.car_available
+        ? `车辆位置：${leg.car_location_after}`
+        : "";
+      rows.push(`
+        <div class="itinerary-leg ${leg.warning ? "leg-warning" : ""}">
+          <span>${escapeHtml(routeText)}</span>
+          ${departText ? `<small>${escapeHtml(departText)}</small>` : ""}
+          ${leg.recommendation_reason ? `<small>${escapeHtml(leg.recommendation_reason)}</small>` : ""}
+          ${carText ? `<small>${escapeHtml(carText)}</small>` : ""}
+          ${leg.warning ? `<strong>${escapeHtml(leg.warning)}</strong>` : ""}
+        </div>
+      `);
+    }
+
+    const locationText = item.event_type === "travel"
+      ? `${item.origin_location?.label || "上一地点"} → ${item.location?.label || "未指定目的地"}`
+      : item.location?.label || "未绑定地点";
+    const statusText = item.kind === "event"
+      ? item.event_type === "travel" ? "赶路" : "固定行程"
+      : item.status === "accepted" ? "已确认任务" : "待确认任务";
+    const itemInteraction = item.location
+      ? `role="button" tabindex="0" onclick="focusItineraryItem('${item.id}')" onkeydown="handleItineraryItemKey(event, '${item.id}')"`
+      : "";
+    rows.push(`
+      <div class="itinerary-item ${item.location ? "has-location" : "without-location"}" ${itemInteraction}>
+        <span class="itinerary-pin">${index + 1}</span>
+        <div class="itinerary-item-copy">
+          <div class="itinerary-item-time">${formatTime(parseDate(item.start_time))}–${formatTime(parseDate(item.end_time))}</div>
+          <strong>${escapeHtml(item.title)}</strong>
+          <span>${escapeHtml(locationText)} · ${escapeHtml(statusText)}</span>
+        </div>
+      </div>
+    `);
+  });
+  const returnLeg = itinerary.legs.find((leg) => leg.destination_id === "origin-return");
+  if (returnLeg && itinerary.origin) {
+    const routeText = returnLeg.duration_minutes === null
+      ? "返程路线待计算"
+      : `${travelModeName(returnLeg.mode)} ${returnLeg.duration_minutes} 分钟${returnLeg.distance_m === null ? "" : ` · ${formatDistance(returnLeg.distance_m)}`}`;
+    rows.push(`
+      <div class="itinerary-leg return-leg">
+        <span>${escapeHtml(routeText)}</span>
+        ${returnLeg.estimated_arrival ? `<small>预计 ${formatTime(parseDate(returnLeg.estimated_arrival))} 返回</small>` : ""}
+      </div>
+      <div class="itinerary-origin return-origin">
+        <span class="itinerary-pin origin-pin">终</span>
+        <div><strong>${escapeHtml(itinerary.origin.label)}</strong><small>返回默认地点</small></div>
+      </div>
+    `);
+  }
+  container.innerHTML = rows.join("");
+}
+
+function travelModeName(mode) {
+  return { smart: "智能推荐", transit: "公交", driving: "驾车", walking: "步行" }[mode] || mode;
+}
+
+function handleItineraryItemKey(event, itemId) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    focusItineraryItem(itemId);
+  }
+}
+
+function focusItineraryItem(itemId) {
+  const route = state.itineraryRoutes.get(itemId);
+  if (route) {
+    route.focus();
+    return;
+  }
+  const entry = state.itineraryMarkers.get(itemId);
+  if (entry) {
+    entry.open();
+  }
+}
+
+function formatDistance(distance) {
+  return distance >= 1000 ? `${(distance / 1000).toFixed(1)} 公里` : `${distance} 米`;
+}
+
+async function loadMapClient() {
+  if (window.AMap) {
+    return window.AMap;
+  }
+  if (state.mapLoadPromise) {
+    return state.mapLoadPromise;
+  }
+  state.mapLoadPromise = (async () => {
+    state.mapClientConfig = await api("/maps/client-config");
+    if (!state.mapClientConfig.configured) {
+      throw new Error(state.mapClientConfig.message);
+    }
+    window._AMapSecurityConfig = {
+      securityJsCode: state.mapClientConfig.js_security_code,
+    };
+    await new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(state.mapClientConfig.js_api_key)}`;
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error("地图脚本加载失败"));
+      document.head.appendChild(script);
+    });
+    return window.AMap;
+  })();
+  try {
+    return await state.mapLoadPromise;
+  } catch (error) {
+    state.mapLoadPromise = null;
+    throw error;
+  }
+}
+
+async function renderItineraryMap() {
+  const itinerary = state.itinerary;
+  const mapElement = $("itineraryMap");
+  if (!itinerary || !mapElement) {
+    return;
+  }
+  state.itineraryMarkers.clear();
+  state.itineraryRoutes.clear();
+  if (state.itineraryInfoWindow) {
+    state.itineraryInfoWindow.close();
+    state.itineraryInfoWindow = null;
+  }
+  const locatedItems = itinerary.items.filter((item) => item.location);
+  if (!locatedItems.length && !itinerary.origin) {
+    showMapFallback("当天事项还没有绑定精确地点");
+    return;
+  }
+
+  let AMap;
+  try {
+    AMap = await loadMapClient();
+  } catch (error) {
+    showMapFallback(error.message);
+    return;
+  }
+  $("mapFallback").classList.add("hidden");
+  mapElement.classList.remove("hidden");
+
+  if (!state.itineraryMap) {
+    state.itineraryMap = new AMap.Map("itineraryMap", {
+      zoom: 12,
+      viewMode: "2D",
+      mapStyle: "amap://styles/whitesmoke",
+    });
+  } else {
+    state.itineraryMap.clearMap();
+  }
+
+  const overlays = [];
+  const markerGroups = new Map();
+  const openMarkerInfo = (entries, position) => {
+    if (state.itineraryInfoWindow) {
+      state.itineraryInfoWindow.close();
+    }
+    const content = entries
+      .map((entry) => `
+        <div class="map-info-entry">
+          <strong>${escapeHtml(entry.title)}</strong>
+          <span>${escapeHtml(entry.location.address || entry.location.label)}</span>
+        </div>
+      `)
+      .join("");
+    const info = new AMap.InfoWindow({
+      content: `<div class="map-info">${content}</div>`,
+      offset: new AMap.Pixel(0, -30),
+    });
+    state.itineraryInfoWindow = info;
+    state.itineraryMap.setCenter(position);
+    info.open(state.itineraryMap, position);
+  };
+  const addMarker = (itemId, location, label, title) => {
+    const position = [location.coordinate.longitude, location.coordinate.latitude];
+    const coordinateKey = `${Number(position[0]).toFixed(6)},${Number(position[1]).toFixed(6)}`;
+    let group = markerGroups.get(coordinateKey);
+    if (!group) {
+      const marker = new AMap.Marker({
+        position,
+        anchor: "bottom-center",
+        title,
+        content: `<div class="map-number-marker"><span>${escapeHtml(label)}</span></div>`,
+      });
+      group = { marker, position, entries: [] };
+      markerGroups.set(coordinateKey, group);
+      marker.on("click", () => openMarkerInfo(group.entries, group.position));
+      overlays.push(marker);
+    }
+    const markerEntry = { itemId, title, location };
+    group.entries.push(markerEntry);
+    const entry = {
+      marker: group.marker,
+      open: () => openMarkerInfo([markerEntry], group.position),
+    };
+    state.itineraryMarkers.set(itemId, entry);
+    return entry;
+  };
+
+  if (itinerary.origin) {
+    addMarker("origin", itinerary.origin, "起", itinerary.origin.label);
+  }
+  locatedItems.forEach((item) => {
+    const timelineIndex = itinerary.items.findIndex(
+      (candidate) => candidate.id === item.id,
+    );
+    if (item.event_type === "travel" && item.origin_location) {
+      addMarker(
+        `${item.id}:origin`,
+        item.origin_location,
+        "出",
+        `${item.title}：出发`,
+      );
+    }
+    addMarker(
+      item.id,
+      item.location,
+      timelineIndex + 1,
+      item.title,
+    );
+  });
+
+  itinerary.legs.forEach((leg) => {
+    let polyline = null;
+    if (leg.path && leg.path.length >= 2) {
+      const modeColors = { walking: "#16a34a", transit: "#0f766e", driving: "#2563eb" };
+      polyline = new AMap.Polyline({
+        path: leg.path.map((point) => [point.longitude, point.latitude]),
+        strokeColor: leg.warning ? "#c2410c" : leg.route_available ? (modeColors[leg.mode] || "#0f766e") : "#94a3b8",
+        strokeWeight: 5,
+        strokeOpacity: 0.9,
+        strokeStyle: leg.route_available ? "solid" : "dashed",
+        lineJoin: "round",
+      });
+      overlays.push(polyline);
+    }
+    const travelItem = itinerary.items.find(
+      (item) => item.id === leg.destination_id && item.event_type === "travel",
+    );
+    if (travelItem) {
+      const originEntry = state.itineraryMarkers.get(`${travelItem.id}:origin`);
+      const destinationEntry = state.itineraryMarkers.get(travelItem.id);
+      state.itineraryRoutes.set(travelItem.id, {
+        focus: () => {
+          originEntry?.open();
+          const routeOverlays = [...new Set([
+            polyline,
+            originEntry?.marker,
+            destinationEntry?.marker,
+          ].filter(Boolean))];
+          if (routeOverlays.length > 1) {
+            state.itineraryMap.setFitView(routeOverlays, false, [80, 80, 80, 80]);
+          } else if (originEntry?.marker) {
+            state.itineraryMap.setZoomAndCenter(15, originEntry.marker.getPosition());
+          }
+        },
+      });
+    }
+  });
+  state.itineraryMap.add(overlays);
+  state.itineraryMap.setFitView(overlays, false, [60, 60, 60, 60]);
+}
+
+function showMapFallback(message) {
+  const fallback = $("mapFallback");
+  $("itineraryMap")?.classList.add("hidden");
+  fallback.textContent = message;
+  fallback.classList.remove("hidden");
+  state.itineraryMarkers.clear();
+  state.itineraryRoutes.clear();
+}
+
+
+/* =========================
    日程规划
 ========================= */
 
@@ -707,24 +1219,17 @@ async function generateSchedule() {
   container.innerHTML = `<div class="empty">正在规划…</div>`;
 
   try {
-    const startValue = $("planStart").value;
-    const days = Number($("planDays").value) || 7;
-    const gap = Number($("planGap").value) || 0;
-    const payload = {
-      days,
-      gap_minutes: gap,
-    };
-    if (startValue) {
-      payload.start = new Date(startValue).toISOString();
-    }
+    const payload = collectPlanPayload();
 
     const result = await api("/schedules/generate", {
       method: "POST",
       body: JSON.stringify(payload),
     });
 
+    state.lastPlanBatchId = result.batch_id || null;
     await loadAllData();
     renderSchedule(result);
+    renderPlanAnalysis(result.analysis, "规划完成");
   } catch (error) {
     container.innerHTML = `
       <div class="empty error">
@@ -734,6 +1239,53 @@ async function generateSchedule() {
   }
 }
 
+function collectPlanPayload() {
+  const startValue = $("planStart").value;
+  const payload = { days: Number($("planDays").value) || 7 };
+  const gapValue = $("planGap").value;
+  const strategy = $("planStrategy").value;
+  if (gapValue !== "") {
+    payload.gap_minutes = Number(gapValue);
+  }
+  if (strategy) {
+    payload.strategy = strategy;
+  }
+  if (startValue) {
+    payload.start = new Date(startValue).toISOString();
+  }
+  return payload;
+}
+
+async function previewSchedule() {
+  try {
+    const result = await api("/schedules/preview", {
+      method: "POST",
+      body: JSON.stringify(collectPlanPayload()),
+    });
+    renderPlanAnalysis(result.analysis, "预览结果");
+  } catch (error) {
+    renderPlanAnalysis({ score: 0, issues: [error.message] }, "预览失败");
+  }
+}
+
+function renderPlanAnalysis(analysis, title = "计划分析") {
+  const container = $("planAnalysis");
+  if (!container || !analysis) {
+    return;
+  }
+  const hours = ((analysis.scheduled_minutes || 0) / 60).toFixed(1);
+  const issues = analysis.issues || [];
+  container.classList.remove("hidden");
+  container.innerHTML = `
+    <div class="score-ring"><strong>${escapeHtml(analysis.score ?? 0)}</strong><span>分</span></div>
+    <div class="analysis-copy">
+      <h3>${escapeHtml(title)}</h3>
+      <p>已安排 ${escapeHtml(analysis.scheduled_count || 0)} 项，共 ${escapeHtml(hours)} 小时；未安排 ${escapeHtml(analysis.unscheduled_count || 0)} 项。</p>
+      ${issues.length ? `<ul>${issues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p class="analysis-good">当前计划没有明显风险。</p>`}
+    </div>
+  `;
+}
+
 function renderSchedule(result) {
   const container = $("scheduleResult");
   if (!container) {
@@ -741,7 +1293,9 @@ function renderSchedule(result) {
   }
 
   const schedules =
-    result && result.schedules ? result.schedules : state.schedules;
+    result && result.schedules
+      ? result.schedules
+      : state.schedules.filter((item) => ["proposed", "accepted"].includes(item.status));
   const unscheduled =
     result && result.unscheduled ? result.unscheduled : [];
 
@@ -790,21 +1344,39 @@ function renderScheduleItem(schedule) {
     : "";
 
   const accepted = schedule.status === "accepted";
+  const proposed = schedule.status === "proposed";
+  const actionable = Number.isInteger(schedule.id);
+  const reason = schedule.reason
+    ? `<div class="schedule-reason">${escapeHtml(schedule.reason)}</div>`
+    : "";
 
   return `
     <div class="schedule ${accepted ? "schedule-accepted" : ""}">
       <div class="schedule-time">${escapeHtml(timeText)}</div>
-      <div class="schedule-title">${escapeHtml(title)}</div>
-      <div class="schedule-actions">
-        <button class="ghost-button" onclick="acceptSchedule(${schedule.id})">
-          ${accepted ? "已确认" : "确认"}
-        </button>
+      <div class="schedule-title"><span class="kind-badge flexible-kind">可调整</span>${escapeHtml(title)}${reason}</div>
+      ${actionable ? `<div class="schedule-actions">
+        ${proposed ? `<button class="ghost-button" onclick="acceptSchedule(${schedule.id})">确认</button>` : `<span class="schedule-status">${accepted ? "已确认" : escapeHtml(schedule.status)}</span>`}
         <button class="delete-button" onclick="deleteSchedule(${schedule.id})">
           移除
         </button>
-      </div>
+      </div>` : ""}
     </div>
   `;
+}
+
+async function acceptAllSchedules() {
+  const query = state.lastPlanBatchId
+    ? `?batch_id=${encodeURIComponent(state.lastPlanBatchId)}`
+    : "";
+  try {
+    const result = await api(`/schedules/accept-all${query}`, { method: "POST" });
+    await refreshSchedules();
+    renderSchedule(null);
+    renderDashboardSchedules();
+    alert(`已确认 ${result.accepted} 条任务安排`);
+  } catch (error) {
+    alert(`确认失败：${error.message}`);
+  }
 }
 
 async function acceptSchedule(id) {
@@ -831,7 +1403,7 @@ async function deleteSchedule(id) {
 }
 
 async function clearSchedules() {
-  if (!confirm("确定清空所有「未确认」的日程吗？")) {
+  if (!confirm("确定清空所有待确认的任务安排吗？")) {
     return;
   }
 
@@ -933,7 +1505,7 @@ function collectDayItems(day, dayEnd) {
   const windowStartMs = dayStartMs + TIMETABLE_START_HOUR * 3600000;
   const windowEndMs = dayStartMs + TIMETABLE_END_HOUR * 3600000;
 
-  const push = (start, end, className, label) => {
+  const push = (start, end, className, label, detailKind, detailId) => {
     if (!start || !end) {
       return;
     }
@@ -953,6 +1525,8 @@ function collectDayItems(day, dayEnd) {
       className,
       label,
       timeText: formatTime(start),
+      detailKind,
+      detailId,
     });
   };
 
@@ -960,15 +1534,19 @@ function collectDayItems(day, dayEnd) {
     const start = parseDate(event.start_time);
     const end = parseDate(event.end_time);
     if (start && end && end > day && start < dayEnd) {
-      push(start, end, "tt-event", event.title);
+      push(start, end, "tt-event", event.title, "event", event.id);
     }
   });
 
   const scheduledTaskIds = new Set(
-    state.schedules.map((schedule) => schedule.task_id)
+    state.schedules
+      .filter((schedule) => ["proposed", "accepted"].includes(schedule.status))
+      .map((schedule) => schedule.task_id)
   );
 
-  state.schedules.forEach((schedule) => {
+  state.schedules
+    .filter((schedule) => ["proposed", "accepted"].includes(schedule.status))
+    .forEach((schedule) => {
     const start = parseDate(schedule.start_time);
     const end = parseDate(schedule.end_time);
     if (start && end && end > day && start < dayEnd) {
@@ -978,9 +1556,9 @@ function collectDayItems(day, dayEnd) {
         schedule.status === "accepted"
           ? "tt-schedule tt-accepted"
           : "tt-schedule";
-      push(start, end, className, title);
+      push(start, end, className, title, "schedule", schedule.id);
     }
-  });
+    });
 
   state.tasks.forEach((task) => {
     const start = parseDate(task.start_time);
@@ -994,7 +1572,7 @@ function collectDayItems(day, dayEnd) {
     const end = new Date(
       start.getTime() + (task.estimated_duration || 60) * 60000
     );
-    push(start, end, "tt-task", task.title);
+    push(start, end, "tt-task", task.title, "task", task.id);
   });
 
   return items;
@@ -1005,11 +1583,275 @@ function renderTimetableItem(item) {
     <div
       class="tt-item ${item.className}"
       style="top:${item.top}px;height:${item.height}px"
-      title="${escapeHtml(item.label)}">
+      title="${escapeHtml(item.label)}"
+      role="button"
+      tabindex="0"
+      onclick="openCalendarItemDetails('${item.detailKind}', ${item.detailId})"
+      onkeydown="handleCalendarItemKey(event, '${item.detailKind}', ${item.detailId})">
       <div class="tt-item-title">${escapeHtml(item.label)}</div>
       <div class="tt-item-time">${escapeHtml(item.timeText)}</div>
     </div>
   `;
+}
+
+function handleCalendarItemKey(event, kind, id) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    openCalendarItemDetails(kind, id);
+  }
+}
+
+function resolveRecordLocation(record, prefix = "location") {
+  if (!record) {
+    return null;
+  }
+  const saved = locationById(record[`${prefix}_id`]);
+  if (saved) {
+    return {
+      label: saved.label,
+      address: saved.address || saved.city || null,
+      coordinate: {
+        longitude: saved.longitude,
+        latitude: saved.latitude,
+      },
+    };
+  }
+  const label = record[prefix] || null;
+  const city = record[`${prefix}_city`] || null;
+  const longitude = record[`${prefix}_longitude`];
+  const latitude = record[`${prefix}_latitude`];
+  const hasCoordinate = longitude !== null && longitude !== undefined && longitude !== "" &&
+    latitude !== null && latitude !== undefined && latitude !== "";
+  if (!label && !city && !hasCoordinate) {
+    return null;
+  }
+  return {
+    label: label || city || "地点",
+    address: city,
+    coordinate: hasCoordinate
+      ? { longitude: Number(longitude), latitude: Number(latitude) }
+      : null,
+  };
+}
+
+function calendarDateText(date) {
+  if (!date) {
+    return "未设置";
+  }
+  const weekday = WEEKDAYS[(date.getDay() + 6) % 7];
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${weekday}`;
+}
+
+function calendarTimeRange(start, end) {
+  if (!start || !end) {
+    return "未设置";
+  }
+  const endText = isSameDay(start, end)
+    ? formatTime(end)
+    : `${end.getMonth() + 1}/${end.getDate()} ${formatTime(end)}`;
+  return `${formatTime(start)}–${endText}`;
+}
+
+function calendarDurationText(start, end) {
+  if (!start || !end) {
+    return "未设置";
+  }
+  const minutes = Math.max(0, Math.round((end - start) / 60000));
+  if (minutes < 60) {
+    return `${minutes} 分钟`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours} 小时 ${remainder} 分钟` : `${hours} 小时`;
+}
+
+function buildCalendarItemDetail(kind, id) {
+  if (kind === "event") {
+    const event = state.events.find((item) => item.id === Number(id));
+    if (!event) {
+      return null;
+    }
+    const start = parseDate(event.start_time);
+    const end = parseDate(event.end_time);
+    const destination = resolveRecordLocation(event);
+    const origin = resolveRecordLocation(event, "origin_location");
+    const isTravel = event.event_type === "travel";
+    const locationText = isTravel
+      ? `${origin?.label || "继承上一地点"} → ${destination?.label || "未指定目的地"}`
+      : destination?.label || "";
+    return {
+      title: event.title,
+      badge: isTravel ? "赶路" : "固定行程",
+      badgeClass: "fixed",
+      description: event.description,
+      details: [
+        ["日期", calendarDateText(start)],
+        ["时间", calendarTimeRange(start, end)],
+        ["时长", calendarDurationText(start, end)],
+      ],
+      locationText,
+      locations: isTravel ? [origin, destination].filter(Boolean) : [destination].filter(Boolean),
+      edit: () => openEventModal(event.id),
+    };
+  }
+
+  if (kind === "schedule") {
+    const schedule = state.schedules.find((item) => item.id === Number(id));
+    if (!schedule) {
+      return null;
+    }
+    const task = state.tasks.find((item) => item.id === schedule.task_id);
+    const start = parseDate(schedule.start_time);
+    const end = parseDate(schedule.end_time);
+    const location = resolveRecordLocation(task);
+    return {
+      title: task?.title || `任务 #${schedule.task_id}`,
+      badge: schedule.status === "accepted" ? "已确认安排" : "待确认安排",
+      badgeClass: schedule.status === "accepted" ? "accepted" : "proposed",
+      description: task?.description || schedule.reason,
+      details: [
+        ["日期", calendarDateText(start)],
+        ["时间", calendarTimeRange(start, end)],
+        ["时长", calendarDurationText(start, end)],
+        ["优先级", task ? getPriorityName(task.priority) : "未设置"],
+      ],
+      locationText: location?.label || "",
+      locations: [location].filter(Boolean),
+      edit: task ? () => openTaskModal(task.id) : null,
+    };
+  }
+
+  const task = state.tasks.find((item) => item.id === Number(id));
+  if (!task) {
+    return null;
+  }
+  const start = parseDate(task.start_time);
+  const end = start
+    ? new Date(start.getTime() + (task.estimated_duration || 60) * 60000)
+    : null;
+  const location = resolveRecordLocation(task);
+  return {
+    title: task.title,
+    badge: "待安排任务",
+    badgeClass: "task",
+    description: task.description,
+    details: [
+      ["日期", calendarDateText(start)],
+      ["时间", calendarTimeRange(start, end)],
+      ["时长", calendarDurationText(start, end)],
+      ["优先级", getPriorityName(task.priority)],
+      ["状态", getStatusName(task.status)],
+    ],
+    locationText: location?.label || "",
+    locations: [location].filter(Boolean),
+    edit: () => openTaskModal(task.id),
+  };
+}
+
+function openCalendarItemDetails(kind, id) {
+  const detail = buildCalendarItemDetail(kind, id);
+  if (!detail) {
+    return;
+  }
+  $("calendarDetailTitle").textContent = detail.title;
+  const badge = $("calendarDetailBadge");
+  badge.textContent = detail.badge;
+  badge.className = `calendar-detail-badge ${detail.badgeClass}`;
+  $("calendarDetailMeta").innerHTML = detail.details
+    .map(([label, value]) => `
+      <div class="calendar-detail-meta-item">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>
+    `)
+    .join("");
+
+  const descriptionSection = $("calendarDetailDescriptionSection");
+  descriptionSection.classList.toggle("hidden", !detail.description);
+  $("calendarDetailDescription").textContent = detail.description || "";
+
+  const locationSection = $("calendarDetailLocationSection");
+  locationSection.classList.toggle("hidden", !detail.locations.length);
+  $("calendarDetailLocationText").textContent = detail.locationText || "";
+
+  state.calendarDetailEdit = detail.edit;
+  $("calendarDetailEditButton").classList.toggle("hidden", !detail.edit);
+  $("calendarDetailModal").classList.remove("hidden");
+  if (detail.locations.length) {
+    showCalendarDetailMapFallback("地图加载中...");
+    renderCalendarDetailMap(detail.locations).catch((error) => {
+      showCalendarDetailMapFallback(error.message || "地图暂时无法显示");
+    });
+  }
+  $("calendarDetailModal").querySelector(".modal-close-button")?.focus();
+}
+
+function closeCalendarItemDetails() {
+  $("calendarDetailModal").classList.add("hidden");
+  state.calendarDetailEdit = null;
+}
+
+function handleCalendarDetailBackdrop(event) {
+  if (event.target === $("calendarDetailModal")) {
+    closeCalendarItemDetails();
+  }
+}
+
+function editCalendarDetailItem() {
+  const edit = state.calendarDetailEdit;
+  closeCalendarItemDetails();
+  edit?.();
+}
+
+function showCalendarDetailMapFallback(message) {
+  $("calendarDetailMap").classList.add("hidden");
+  const fallback = $("calendarDetailMapFallback");
+  fallback.textContent = message;
+  fallback.classList.remove("hidden");
+}
+
+async function renderCalendarDetailMap(locations) {
+  const preciseLocations = locations.filter((location) => location.coordinate);
+  if (!preciseLocations.length) {
+    showCalendarDetailMapFallback("该地点还没有精确坐标");
+    return;
+  }
+  const AMap = await loadMapClient();
+  if ($("calendarDetailModal").classList.contains("hidden")) {
+    return;
+  }
+  const mapElement = $("calendarDetailMap");
+  mapElement.classList.remove("hidden");
+  $("calendarDetailMapFallback").classList.add("hidden");
+
+  if (!state.calendarDetailMap) {
+    state.calendarDetailMap = new AMap.Map("calendarDetailMap", {
+      zoom: 15,
+      viewMode: "2D",
+      mapStyle: "amap://styles/whitesmoke",
+    });
+  } else {
+    state.calendarDetailMap.clearMap();
+    state.calendarDetailMap.resize();
+  }
+
+  const uniqueLocations = [...new Map(
+    preciseLocations.map((location) => [
+      `${Number(location.coordinate.longitude).toFixed(6)},${Number(location.coordinate.latitude).toFixed(6)}`,
+      location,
+    ]),
+  ).values()];
+  const markers = uniqueLocations.map((location) => new AMap.Marker({
+    position: [location.coordinate.longitude, location.coordinate.latitude],
+    title: location.label,
+    anchor: "bottom-center",
+  }));
+  state.calendarDetailMap.add(markers);
+  if (markers.length === 1) {
+    state.calendarDetailMap.setZoomAndCenter(15, markers[0].getPosition());
+  } else {
+    state.calendarDetailMap.setFitView(markers, false, [44, 44, 44, 44]);
+  }
 }
 
 function previousWeek() {
@@ -1025,6 +1867,436 @@ function nextWeek() {
 function goToday() {
   state.weekStart = startOfWeek(new Date());
   renderTimetables();
+}
+
+
+/* =========================
+   规划偏好
+========================= */
+
+async function loadPreferences() {
+  const preferences = await api("/preferences");
+  state.preferences = preferences;
+  $("prefTimezone").value = preferences.timezone;
+  $("prefLocation").value = preferences.default_location;
+  $("prefWorkStart").value = preferences.workday_start;
+  $("prefWorkEnd").value = preferences.workday_end;
+  $("prefLunchStart").value = preferences.lunch_start || "";
+  $("prefLunchEnd").value = preferences.lunch_end || "";
+  $("prefDuration").value = preferences.default_task_duration_min;
+  $("prefGap").value = preferences.default_gap_minutes;
+  $("prefStrategy").value = preferences.planning_strategy;
+  $("prefWeekends").checked = preferences.schedule_weekends;
+
+  if ($("planGap") && $("planGap").value === "0") {
+    $("planGap").value = preferences.default_gap_minutes;
+  }
+}
+
+async function savePreferences() {
+  const feedback = $("settingsFeedback");
+  const payload = {
+    timezone: $("prefTimezone").value.trim(),
+    default_location: $("prefLocation").value.trim(),
+    workday_start: $("prefWorkStart").value,
+    workday_end: $("prefWorkEnd").value,
+    lunch_start: $("prefLunchStart").value || null,
+    lunch_end: $("prefLunchEnd").value || null,
+    default_task_duration_min: Number($("prefDuration").value),
+    default_gap_minutes: Number($("prefGap").value),
+    planning_strategy: $("prefStrategy").value,
+    schedule_weekends: $("prefWeekends").checked,
+  };
+  try {
+    state.preferences = await api("/preferences", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+    $("planGap").value = state.preferences.default_gap_minutes;
+    feedback.textContent = "设置已保存，下一次规划会自动使用。";
+    feedback.className = "feedback success";
+  } catch (error) {
+    feedback.textContent = `保存失败：${error.message}`;
+    feedback.className = "feedback error";
+  }
+}
+
+
+/* =========================
+   常用地点
+========================= */
+
+async function loadLocations() {
+  state.locations = await api("/locations");
+  renderLocations();
+  populateLocationOptions();
+  renderTasks();
+  renderEvents();
+}
+
+function locationById(locationId) {
+  return state.locations.find((item) => item.id === Number(locationId)) || null;
+}
+
+function modalLocationIds(kind) {
+  const prefix = kind === "task"
+    ? "task"
+    : kind === "eventOrigin"
+      ? "eventOrigin"
+      : "event";
+  return {
+    saved: `${prefix}LocationId`,
+    name: `${prefix}Location`,
+    city: `${prefix}LocationCity`,
+    longitude: `${prefix}LocationLongitude`,
+    latitude: `${prefix}LocationLatitude`,
+    search: `${prefix}LocationSearch`,
+    candidates: `${prefix}LocationCandidates`,
+  };
+}
+
+function setModalLocationFields(kind, value = {}) {
+  const ids = modalLocationIds(kind);
+  const fieldPrefix = kind === "eventOrigin" ? "origin_location" : "location";
+  $(ids.saved).value = value[`${fieldPrefix}_id`] || "";
+  $(ids.name).value = value[fieldPrefix] || "";
+  $(ids.city).value = value[`${fieldPrefix}_city`] || "";
+  $(ids.longitude).value = value[`${fieldPrefix}_longitude`] ?? "";
+  $(ids.latitude).value = value[`${fieldPrefix}_latitude`] ?? "";
+  $(ids.search).value = "";
+  $(ids.candidates).innerHTML = "";
+  $(ids.candidates).classList.add("hidden");
+  state.modalLocationCandidates[kind] = [];
+}
+
+function clearModalLocation(kind) {
+  const ids = modalLocationIds(kind);
+  $(ids.saved).value = "";
+  setModalLocationFields(kind);
+}
+
+function selectSavedLocationForForm(kind) {
+  const ids = modalLocationIds(kind);
+  const location = locationById($(ids.saved).value);
+  if (!location) {
+    return;
+  }
+  $(ids.name).value = location.label || location.address || "";
+  $(ids.city).value = location.city || "";
+  $(ids.longitude).value = location.longitude;
+  $(ids.latitude).value = location.latitude;
+}
+
+function markCustomLocation(kind) {
+  $(modalLocationIds(kind).saved).value = "";
+}
+
+function handleLocationSearchKey(event, kind) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    searchModalLocation(kind);
+  }
+}
+
+async function searchModalLocation(kind) {
+  const ids = modalLocationIds(kind);
+  const query = $(ids.search).value.trim() || $(ids.name).value.trim();
+  const city = $(ids.city).value.trim() || state.preferences?.default_location || "";
+  if (!query) {
+    alert("请输入要搜索的地点");
+    return;
+  }
+
+  const container = $(ids.candidates);
+  container.classList.remove("hidden");
+  container.innerHTML = '<div class="location-candidate-status">正在搜索...</div>';
+  try {
+    const result = await api(
+      `/maps/places?q=${encodeURIComponent(query)}&city=${encodeURIComponent(city)}&limit=6`,
+    );
+    state.modalLocationCandidates[kind] = result.places || [];
+    renderModalLocationCandidates(kind);
+  } catch (error) {
+    state.modalLocationCandidates[kind] = [];
+    container.innerHTML = `<div class="location-candidate-status error-text">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderModalLocationCandidates(kind) {
+  const ids = modalLocationIds(kind);
+  const places = state.modalLocationCandidates[kind] || [];
+  const container = $(ids.candidates);
+  if (!places.length) {
+    container.innerHTML = '<div class="location-candidate-status">没有找到匹配地点</div>';
+    return;
+  }
+  container.innerHTML = places
+    .map((place, index) => {
+      const detail = [place.address, place.district, place.city].filter(Boolean).join(" · ");
+      return `
+        <button class="location-candidate" type="button" onclick="selectModalLocationCandidate('${kind}', ${index})">
+          <strong>${escapeHtml(place.name)}</strong>
+          <span>${escapeHtml(detail || "精确地点")}</span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function selectModalLocationCandidate(kind, index) {
+  const place = state.modalLocationCandidates[kind]?.[index];
+  if (!place) {
+    return;
+  }
+  const ids = modalLocationIds(kind);
+  $(ids.saved).value = "";
+  $(ids.name).value = place.name || place.address || "";
+  $(ids.city).value = place.city || "";
+  $(ids.longitude).value = place.coordinate?.longitude ?? "";
+  $(ids.latitude).value = place.coordinate?.latitude ?? "";
+  $(ids.search).value = place.name || "";
+  $(ids.candidates).classList.add("hidden");
+}
+
+function modalLocationPayload(kind) {
+  const ids = modalLocationIds(kind);
+  const locationId = Number($(ids.saved).value) || null;
+  const name = $(ids.name).value.trim() || null;
+  const city = $(ids.city).value.trim() || null;
+  const longitudeText = $(ids.longitude).value.trim();
+  const latitudeText = $(ids.latitude).value.trim();
+  if (Boolean(longitudeText) !== Boolean(latitudeText)) {
+    alert("地点经度和纬度需要同时填写");
+    return null;
+  }
+  const prefix = kind === "eventOrigin" ? "origin_location" : "location";
+  return {
+    [`${prefix}_id`]: locationId,
+    [prefix]: locationId ? null : name,
+    [`${prefix}_city`]: locationId ? null : city,
+    [`${prefix}_longitude`]: locationId || !longitudeText ? null : Number(longitudeText),
+    [`${prefix}_latitude`]: locationId || !latitudeText ? null : Number(latitudeText),
+  };
+}
+
+function emptyModalLocationPayload(prefix) {
+  return {
+    [`${prefix}_id`]: null,
+    [prefix]: null,
+    [`${prefix}_city`]: null,
+    [`${prefix}_longitude`]: null,
+    [`${prefix}_latitude`]: null,
+  };
+}
+
+function populateLocationOptions() {
+  for (const selectId of ["taskLocationId", "eventLocationId", "eventOriginLocationId"]) {
+    const select = $(selectId);
+    if (!select) {
+      continue;
+    }
+    const current = select.value;
+    const emptyLabel = selectId === "taskLocationId"
+      ? "不指定地点"
+      : selectId === "eventOriginLocationId"
+        ? "自动继承上一地点"
+        : "不绑定精确地点";
+    select.innerHTML = [
+      `<option value="">${emptyLabel}</option>`,
+      ...state.locations.map(
+        (location) =>
+          `<option value="${location.id}">${escapeHtml(location.label)}${location.is_default ? "（默认）" : ""}</option>`,
+      ),
+    ].join("");
+    select.value = current;
+  }
+}
+
+function renderLocations() {
+  const container = $("locationList");
+  if (!container) {
+    return;
+  }
+  if (state.locations.length === 0) {
+    container.innerHTML = '<div class="location-empty">暂无常用地点</div>';
+    return;
+  }
+
+  container.innerHTML = state.locations
+    .map((location) => {
+      const address = location.address || location.city || "未填写地址";
+      const coordinates = `${Number(location.longitude).toFixed(6)}, ${Number(location.latitude).toFixed(6)}`;
+      return `
+        <div class="location-row">
+          <div class="location-copy">
+            <div class="location-title">
+              <strong>${escapeHtml(location.label)}</strong>
+              ${location.is_default ? '<span class="location-default">默认</span>' : ""}
+            </div>
+            <div class="location-address">${escapeHtml(address)}</div>
+            <div class="location-coordinates">${escapeHtml(coordinates)}</div>
+          </div>
+          <div class="location-actions">
+            ${location.is_default ? "" : `<button class="ghost-button" type="button" onclick="setDefaultLocation(${location.id})">设为默认</button>`}
+            <button class="ghost-button" type="button" onclick="editLocation(${location.id})">编辑</button>
+            <button class="ghost-button danger-button" type="button" onclick="deleteLocation(${location.id})">删除</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function editLocation(locationId) {
+  const location = state.locations.find((item) => item.id === locationId);
+  if (!location) {
+    return;
+  }
+  state.editingLocationId = locationId;
+  $("locationLabel").value = location.label;
+  $("locationCity").value = location.city || "";
+  $("locationAddress").value = location.address || "";
+  $("locationLongitude").value = location.longitude;
+  $("locationLatitude").value = location.latitude;
+  $("locationDefault").checked = location.is_default;
+  $("locationSaveButton").textContent = "保存地点";
+  $("locationCancelButton").classList.remove("hidden");
+  $("locationLabel").focus();
+}
+
+function resetLocationForm() {
+  state.editingLocationId = null;
+  $("locationLabel").value = "";
+  $("locationCity").value = state.preferences?.default_location || "";
+  $("locationAddress").value = "";
+  $("locationLongitude").value = "";
+  $("locationLatitude").value = "";
+  $("locationDefault").checked = state.locations.length === 0;
+  $("locationSaveButton").textContent = "添加地点";
+  $("locationCancelButton").classList.add("hidden");
+}
+
+function showLocationFeedback(message, type = "success") {
+  const feedback = $("locationFeedback");
+  feedback.textContent = message;
+  feedback.className = `feedback ${type}`;
+}
+
+async function saveLocation() {
+  const longitude = Number($("locationLongitude").value);
+  const latitude = Number($("locationLatitude").value);
+  const payload = {
+    label: $("locationLabel").value.trim(),
+    city: $("locationCity").value.trim() || null,
+    address: $("locationAddress").value.trim() || null,
+    longitude,
+    latitude,
+    is_default: $("locationDefault").checked,
+  };
+
+  if (!payload.label) {
+    showLocationFeedback("请填写地点名称。", "error");
+    return;
+  }
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+    showLocationFeedback("请填写有效的经纬度。", "error");
+    return;
+  }
+
+  const editingId = state.editingLocationId;
+  try {
+    await api(editingId ? `/locations/${editingId}` : "/locations", {
+      method: editingId ? "PUT" : "POST",
+      body: JSON.stringify(payload),
+    });
+    await loadLocations();
+    resetLocationForm();
+    showLocationFeedback(editingId ? "地点已更新。" : "地点已添加。");
+  } catch (error) {
+    showLocationFeedback(`保存失败：${error.message}`, "error");
+  }
+}
+
+async function setDefaultLocation(locationId) {
+  try {
+    await api(`/locations/${locationId}`, {
+      method: "PUT",
+      body: JSON.stringify({ is_default: true }),
+    });
+    await loadLocations();
+    showLocationFeedback("默认出发点已更新。");
+  } catch (error) {
+    showLocationFeedback(`设置失败：${error.message}`, "error");
+  }
+}
+
+async function deleteLocation(locationId) {
+  const location = state.locations.find((item) => item.id === locationId);
+  if (!location || !confirm(`确定删除地点“${location.label}”吗？`)) {
+    return;
+  }
+  try {
+    await api(`/locations/${locationId}`, { method: "DELETE" });
+    await loadLocations();
+    if (state.editingLocationId === locationId) {
+      resetLocationForm();
+    }
+    showLocationFeedback("地点已删除。");
+  } catch (error) {
+    showLocationFeedback(`删除失败：${error.message}`, "error");
+  }
+}
+
+function useBrowserLocation() {
+  if (!navigator.geolocation) {
+    showLocationFeedback("当前浏览器不支持位置获取。", "error");
+    return;
+  }
+  showLocationFeedback("正在获取当前位置...");
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      $("locationLongitude").value = position.coords.longitude.toFixed(6);
+      $("locationLatitude").value = position.coords.latitude.toFixed(6);
+      showLocationFeedback("已获取当前位置坐标。");
+    },
+    (error) => {
+      const messages = {
+        1: "位置权限未授予。",
+        2: "暂时无法获取当前位置。",
+        3: "获取当前位置超时。",
+      };
+      showLocationFeedback(messages[error.code] || "获取当前位置失败。", "error");
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+  );
+}
+
+async function resolveLocationAddress() {
+  const address = $("locationAddress").value.trim();
+  if (!address) {
+    showLocationFeedback("请先填写详细地址。", "error");
+    return;
+  }
+  try {
+    const result = await api("/maps/geocode", {
+      method: "POST",
+      body: JSON.stringify({
+        address,
+        city: $("locationCity").value.trim() || null,
+      }),
+    });
+    $("locationLongitude").value = result.place.coordinate.longitude;
+    $("locationLatitude").value = result.place.coordinate.latitude;
+    if (result.place.address) {
+      $("locationAddress").value = result.place.address;
+    }
+    if (result.place.city) {
+      $("locationCity").value = result.place.city;
+    }
+    showLocationFeedback("地址已解析为坐标。");
+  } catch (error) {
+    showLocationFeedback(`解析失败：${error.message}`, "error");
+  }
 }
 
 
@@ -1049,10 +2321,13 @@ function renderChatMessages() {
         const roleClass = isUser ? "chat-user" : "chat-assistant";
         const label = isUser ? "我" : "助手";
 
+        const content = isUser
+          ? escapeHtml(message.content)
+          : renderMarkdown(message.content);
         return `
           <div class="chat-bubble ${roleClass}">
             <div class="chat-bubble-label">${escapeHtml(label)}</div>
-            <div class="chat-bubble-content">${escapeHtml(message.content)}</div>
+            <div class="chat-bubble-content ${isUser ? "" : "markdown-content"}">${content}</div>
           </div>
         `;
       })
@@ -1081,6 +2356,172 @@ function renderChatMessages() {
       bar.classList.add("hidden");
     }
   }
+}
+
+function renderMarkdown(value) {
+  const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+  const output = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    if (
+      index + 1 < lines.length &&
+      line.includes("|") &&
+      isMarkdownTableSeparator(lines[index + 1])
+    ) {
+      const headers = markdownTableCells(line);
+      index += 2;
+      const rows = [];
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        rows.push(markdownTableCells(lines[index]));
+        index += 1;
+      }
+      output.push(`
+        <div class="markdown-table-wrap"><table>
+          <thead><tr>${headers.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr></thead>
+          <tbody>${rows
+            .map(
+              (row) =>
+                `<tr>${headers
+                  .map((_, cellIndex) => `<td>${renderInlineMarkdown(row[cellIndex] || "")}</td>`)
+                  .join("")}</tr>`,
+            )
+            .join("")}</tbody>
+        </table></div>
+      `);
+      continue;
+    }
+
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (unordered) {
+      const items = [];
+      while (index < lines.length) {
+        const match = lines[index].match(/^\s*[-*+]\s+(.+)$/);
+        if (!match) break;
+        items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);
+        index += 1;
+      }
+      output.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (ordered) {
+      const items = [];
+      while (index < lines.length) {
+        const match = lines[index].match(/^\s*\d+[.)]\s+(.+)$/);
+        if (!match) break;
+        items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);
+        index += 1;
+      }
+      output.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(heading[1].length + 2, 6);
+      output.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    const paragraph = [line.trim()];
+    index += 1;
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !/^\s*[-*+]\s+/.test(lines[index]) &&
+      !/^\s*\d+[.)]\s+/.test(lines[index]) &&
+      !/^#{1,4}\s+/.test(lines[index]) &&
+      !(
+        index + 1 < lines.length &&
+        lines[index].includes("|") &&
+        isMarkdownTableSeparator(lines[index + 1])
+      )
+    ) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    output.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+  }
+  return output.join("");
+}
+
+function renderInlineMarkdown(value) {
+  const codeTokens = [];
+  let escaped = escapeHtml(value).replace(/`([^`]+)`/g, (_, code) => {
+    const token = `@@PLANPILOT_CODE_${codeTokens.length}@@`;
+    codeTokens.push(`<code>${code}</code>`);
+    return token;
+  });
+  escaped = escaped.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  codeTokens.forEach((html, tokenIndex) => {
+    escaped = escaped.replace(`@@PLANPILOT_CODE_${tokenIndex}@@`, html);
+  });
+  return escaped;
+}
+
+function markdownTableCells(line) {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparator(line) {
+  const cells = markdownTableCells(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+async function loadChatHistory() {
+  if (state.chatLoaded) {
+    renderChatMessages();
+    return;
+  }
+  const messages = await api(`/agent/sessions/${state.chatSessionId}/messages`);
+  state.chatMessages = messages.map((item) => ({
+    role: item.role,
+    content: item.content,
+  }));
+  state.chatLoaded = true;
+  renderChatMessages();
+}
+
+async function loadAgentStatus() {
+  const status = await api("/agent/status");
+  const badge = $("agentStatus");
+  if (!badge) {
+    return;
+  }
+  const local = status.mode === "local" || status.fallback_active;
+  badge.textContent = local
+    ? "本地规则模式"
+    : `大模型 · ${status.model || "已连接"}`;
+  badge.className = `status-badge ${local ? "status-local" : "status-online"}`;
+}
+
+function renderAgentTrace(data) {
+  const trace = $("agentTrace");
+  const content = $("agentTraceContent");
+  const calls = data.tool_calls || [];
+  const changes = data.applied_changes || [];
+  if (!trace || !content || (!calls.length && !changes.length)) {
+    trace?.classList.add("hidden");
+    return;
+  }
+  const rows = calls.map((call) => `
+    <div class="trace-row">
+      <span class="trace-state ${call.success ? "ok" : "failed"}">${call.success ? "完成" : "失败"}</span>
+      <strong>${escapeHtml(call.name)}</strong>
+      <span>${escapeHtml(call.summary || "")}</span>
+    </div>
+  `);
+  content.innerHTML = rows.join("");
+  trace.classList.remove("hidden");
 }
 
 function scrollChatToBottom() {
@@ -1124,7 +2565,9 @@ async function sendChatMessage() {
     });
 
     state.chatSessionId = data.session_id;
+    localStorage.setItem("planpilot_session_id", data.session_id);
     state.chatMessages.push({ role: "assistant", content: data.reply });
+    renderAgentTrace(data);
 
     if (data.confirmation && data.confirmation.required) {
       state.chatPendingConfirmation = {
@@ -1132,6 +2575,10 @@ async function sendChatMessage() {
         summary: data.confirmation.summary,
       };
     }
+    if ((data.applied_changes || []).length || (data.proposed_schedules || []).length) {
+      await loadAllData();
+    }
+    await loadAgentStatus();
   } catch (error) {
     state.chatMessages.push({
       role: "assistant",
@@ -1166,6 +2613,10 @@ async function confirmChatDecision(decision) {
 
     state.chatSessionId = data.session_id;
     state.chatMessages.push({ role: "assistant", content: data.reply });
+    renderAgentTrace(data);
+    if ((data.applied_changes || []).length || (data.proposed_schedules || []).length) {
+      await loadAllData();
+    }
   } catch (error) {
     state.chatMessages.push({
       role: "assistant",
@@ -1177,14 +2628,19 @@ async function confirmChatDecision(decision) {
   }
 }
 
-function clearChat() {
+async function clearChat() {
   if (!confirm("确定清空对话吗？")) {
     return;
   }
-  state.chatMessages = [];
-  state.chatSessionId = null;
-  state.chatPendingConfirmation = null;
-  renderChatMessages();
+  try {
+    await api(`/agent/sessions/${state.chatSessionId}/messages`, { method: "DELETE" });
+    state.chatMessages = [];
+    state.chatPendingConfirmation = null;
+    $("agentTrace")?.classList.add("hidden");
+    renderChatMessages();
+  } catch (error) {
+    alert(`清空失败：${error.message}`);
+  }
 }
 
 
@@ -1203,7 +2659,12 @@ function handleError(error) {
 
 function init() {
   state.weekStart = startOfWeek(new Date());
-  loadTasks().catch(handleError);
+  if ($("itineraryDate")) {
+    $("itineraryDate").value = localDateInputValue();
+  }
+  Promise.all([loadAllData(), loadPreferences(), loadLocations()])
+    .then(() => resetLocationForm())
+    .catch(handleError);
 
   const chatInput = $("chatInput");
   if (chatInput) {
@@ -1216,6 +2677,11 @@ function init() {
       }
     });
   }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("calendarDetailModal").classList.contains("hidden")) {
+      closeCalendarItemDetails();
+    }
+  });
 }
 
 if (document.readyState === "loading") {

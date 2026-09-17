@@ -9,7 +9,7 @@
 
 from typing import List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -38,6 +38,37 @@ def generate_schedules(
     db: Session = Depends(get_db),
 ):
     return schedule_service.generate_schedules(db, payload)
+
+
+@router.post("/preview")
+def preview_schedules(
+    payload: ScheduleGenerateRequest,
+    db: Session = Depends(get_db),
+):
+    return schedule_service.preview_plan(db, payload)
+
+
+@router.post("/accept-all")
+def accept_all_schedules(
+    batch_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    return schedule_service.accept_all_schedules(db, batch_id)
+
+
+@router.post("/evaluate")
+def evaluate_schedules(
+    payload: ScheduleGenerateRequest,
+    db: Session = Depends(get_db),
+):
+    evaluation = schedule_service.evaluate_plan_dry_run(db, payload)
+    return {
+        "score": evaluation.score,
+        "issues": evaluation.issues,
+        "scheduled_count": evaluation.scheduled_count,
+        "unscheduled_count": evaluation.unscheduled_count,
+        "scheduled_minutes": evaluation.scheduled_minutes,
+    }
 
 
 @router.delete("")

@@ -1,12 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Project ：mine
 # File    ：base.py
-"""Skill 基类与注册表。
-
-第一版：Skill 是「意图 → 推荐工具流程」的提示词档案（prompt profile），
-通过关键词匹配被选中，并注入到 system prompt 中引导 LLM。
-后续可升级为带确定性 run() 的完整工作流。
-"""
+"""Skill 基类与按关键词相关度选择的提示词档案注册表。"""
 
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -31,9 +26,11 @@ class SkillRegistry:
         self._skills.append(skill)
 
     def select(self, message: str) -> Optional[Skill]:
-        """按关键词匹配返回第一个命中的技能。"""
+        """优先选择命中词更多、更具体的技能。"""
 
-        for skill in self._skills:
-            if skill.matches(message):
-                return skill
-        return None
+        ranked = []
+        for index, skill in enumerate(self._skills):
+            matched = [keyword for keyword in skill.keywords if keyword in message]
+            if matched:
+                ranked.append((sum(map(len, matched)), len(matched), -index, skill))
+        return max(ranked, default=(0, 0, 0, None), key=lambda item: item[:3])[3]

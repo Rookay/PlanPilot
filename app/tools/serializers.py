@@ -25,6 +25,11 @@ def task_to_dict(task) -> dict:
         "earliest_start": _iso(task.earliest_start),
         "preferred_time": task.preferred_time,
         "category": task.category,
+        "location_id": task.location_id,
+        "location": task.location,
+        "location_city": task.location_city,
+        "location_longitude": task.location_longitude,
+        "location_latitude": task.location_latitude,
     }
 
 
@@ -35,7 +40,17 @@ def event_to_dict(event) -> dict:
         "description": event.description,
         "start_time": _iso(event.start_time),
         "end_time": _iso(event.end_time),
+        "event_type": event.event_type,
         "location": event.location,
+        "location_id": event.location_id,
+        "location_city": event.location_city,
+        "location_longitude": event.location_longitude,
+        "location_latitude": event.location_latitude,
+        "origin_location": event.origin_location,
+        "origin_location_id": event.origin_location_id,
+        "origin_location_city": event.origin_location_city,
+        "origin_location_longitude": event.origin_location_longitude,
+        "origin_location_latitude": event.origin_location_latitude,
     }
 
 

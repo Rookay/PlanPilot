@@ -15,7 +15,8 @@ def build_default_skills() -> SkillRegistry:
                 keywords=["要做", "需要完成", "添加任务", "新建任务", "创建任务", "记得"],
                 system_hint=(
                     "【任务理解】用户描述了一件要做的事。请抽取任务名称、预计时长、"
-                    "优先级、截止时间等字段，然后调用 create_task 创建任务。"
+                    "优先级、截止时间等字段。只有外部时间已经确定且不能移动时才创建固定行程，"
+                    "其余情况调用 create_task，让规划器生成任务安排。"
                 ),
             ),
             Skill(
@@ -39,6 +40,27 @@ def build_default_skills() -> SkillRegistry:
                     "【重规划】先了解被影响的任务/事件（get_tasks / get_events / get_schedules），"
                     "做必要的修改（如 create_event / update_task），"
                     "再调用 replan 重新生成日程（会产生确认请求）。"
+                ),
+            ),
+            Skill(
+                name="weather_planning",
+                description="结合天气调整日程",
+                keywords=["天气", "下雨", "下雪", "高温", "降温", "户外"],
+                system_hint=(
+                    "【天气规划】先用 get_current_time 确定日期，再调用 get_weather 获取真实天气。"
+                    "随后查询任务和日程；如果天气会影响户外安排，解释影响并在需要时调用 replan。"
+                ),
+            ),
+            Skill(
+                name="travel_planning",
+                description="查询地点并把真实通勤耗时用于规划",
+                keywords=["地点", "地址", "在哪", "路线", "通勤", "路上", "开车", "公交", "步行"],
+                system_hint=(
+                    "【地点与通勤】地点含糊时先调用 search_places；完整地址可调用 geocode_address。"
+                    "有多个合理候选时先请用户选择，不要猜测。确定起终点坐标后调用 "
+                    "estimate_travel_time，路线距离和耗时必须以工具结果为准。"
+                    "安排多个连续地点时逐段验证；通勤时间不足时先调整可移动任务，"
+                    "固定行程无法调整则明确报告差额，不要写入明知会迟到的时间。"
                 ),
             ),
             Skill(

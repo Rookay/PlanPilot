@@ -4,7 +4,7 @@
 # IDE     ：PyCharm 
 # Author  ：刘景涛
 # Date    ：2026/9/11 14:11
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
 
 from app.database import Base
 from app.utils import utcnow
@@ -37,8 +37,18 @@ class Schedule(Base):
         default="proposed",
     )
 
+    plan_batch_id = Column(String(32), nullable=True, index=True)
+    reason = Column(Text, nullable=True)
+
     created_at = Column(
         DateTime,
         default=utcnow,
+        nullable=False,
+    )
+
+    updated_at = Column(
+        DateTime,
+        default=utcnow,
+        onupdate=utcnow,
         nullable=False,
     )

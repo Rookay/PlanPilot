@@ -16,6 +16,13 @@ class ChatMessage(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
+    session_id = Column(
+        String(64),
+        nullable=False,
+        default="legacy",
+        index=True,
+    )
+
     role = Column(
         String(20),
         nullable=False,

@@ -54,20 +54,25 @@ class Agent:
         decision: str,
         session_id: str,
     ) -> AgentResult:
-        pending = self.confirmation_store.get(action_id)
+        pending = self.confirmation_store.get(action_id, session_id)
         if pending is None:
-            return AgentResult(
+            result = AgentResult(
                 reply="该确认请求不存在或已过期，请重新发起操作。",
                 session_id=session_id,
             )
+            self.memory.add(session_id, "assistant", result.reply)
+            return result
 
         if decision == "reject":
             self.confirmation_store.remove(action_id)
-            return AgentResult(reply="已取消该操作。", session_id=session_id)
+            result = AgentResult(reply="已取消该操作。", session_id=session_id)
+            self.memory.add(session_id, "assistant", result.reply)
+            return result
 
         applied: list = []
         proposed: list = []
         summaries: list = []
+        errors: list = []
         for call in pending.tool_calls:
             result = self.registry.execute(call["name"], call["args"], db)
             if result.success:
@@ -79,14 +84,21 @@ class Agent:
                     and isinstance(result.data.get("schedules"), list)
                 ):
                     proposed = result.data["schedules"]
+            else:
+                errors.append(result.error or f"{call['name']} 执行失败")
 
         self.confirmation_store.remove(action_id)
 
-        reply = "已执行：" + "；".join(summaries) if summaries else "操作完成。"
+        if errors:
+            reply = "操作未能完成：" + "；".join(errors)
+        else:
+            reply = "已执行：" + "；".join(summaries) if summaries else "操作完成。"
 
-        return AgentResult(
+        result = AgentResult(
             reply=reply,
             session_id=session_id,
             applied_changes=applied,
             proposed_schedules=proposed,
         )
+        self.memory.add(session_id, "assistant", result.reply)
+        return result

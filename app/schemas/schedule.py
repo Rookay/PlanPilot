@@ -7,6 +7,7 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ScheduleStatus = Literal["proposed", "accepted", "completed", "cancelled"]
+PlanningStrategy = Literal["balanced", "deadline_first", "priority_first"]
 
 
 class ScheduleBase(BaseModel):
@@ -37,6 +38,9 @@ class ScheduleResponse(ScheduleBase):
 
     id: int
     created_at: datetime
+    updated_at: datetime
+    plan_batch_id: Optional[str] = None
+    reason: Optional[str] = None
 
 
 class ScheduleWindow(BaseModel):
@@ -62,7 +66,9 @@ class ScheduleGenerateRequest(BaseModel):
     #: 显式时间窗口（例如「今天晚上 + 明天下午」）；传入后优先于 start/days。
     windows: Optional[List[ScheduleWindow]] = None
     #: 相邻任务之间的最小空闲间隔（分钟）。
-    gap_minutes: int = Field(default=0, ge=0, le=240)
+    gap_minutes: Optional[int] = Field(default=None, ge=0, le=240)
+    #: 排序策略；缺省时读取用户偏好。
+    strategy: Optional[PlanningStrategy] = None
 
 
 class UnscheduledTask(BaseModel):
@@ -71,6 +77,16 @@ class UnscheduledTask(BaseModel):
     reason: str
 
 
+class PlanAnalysis(BaseModel):
+    score: int = Field(ge=0, le=100)
+    scheduled_count: int = 0
+    unscheduled_count: int = 0
+    scheduled_minutes: int = 0
+    issues: List[str] = Field(default_factory=list)
+
+
 class ScheduleGenerateResponse(BaseModel):
     schedules: List[ScheduleResponse]
     unscheduled: List[UnscheduledTask]
+    analysis: PlanAnalysis
+    batch_id: Optional[str] = None

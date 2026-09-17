@@ -4,6 +4,7 @@
 """Agent Loop：LLM 决策 + 工具执行 + 结果观察 的循环。"""
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -38,8 +39,9 @@ class AgentResult:
 
 
 class AgentLoop:
-    MAX_ITERATIONS = 8
-    MAX_TOOL_CALLS = 16
+    MAX_ITERATIONS = 12
+    MAX_TOOL_CALLS = 24
+    FALLBACK_COOLDOWN_SECONDS = 60
 
     def __init__(
         self,
@@ -54,6 +56,9 @@ class AgentLoop:
         self.memory = memory
         self.confirmation_store = confirmation_store
         self.skill_registry = skill_registry
+        self.fallback_provider = MockProvider()
+        self.fallback_until = 0.0
+        self.last_provider_error: Optional[str] = None
 
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
         self.memory.add(session_id, "user", message)
@@ -68,8 +73,15 @@ class AgentLoop:
 
         for _ in range(self.MAX_ITERATIONS):
             try:
-                response = self.llm.chat(messages, tools=self.registry.schemas())
+                provider = (
+                    self.fallback_provider
+                    if time.monotonic() < self.fallback_until
+                    else self.llm
+                )
+                response = provider.chat(messages, tools=self.registry.schemas())
             except Exception as exc:  # noqa: BLE001
+                self.last_provider_error = str(exc)
+                self.fallback_until = time.monotonic() + self.FALLBACK_COOLDOWN_SECONDS
                 messages.append(
                     {
                         "role": "system",
@@ -79,12 +91,9 @@ class AgentLoop:
                         ),
                     }
                 )
-                response = MockProvider(
-                    fixed_text=(
-                        "真实模型暂时连接不上，我先用本地规则模式处理。"
-                        "你可以继续使用任务查询、自动规划、冲突检查等基础能力。"
-                    )
-                ).chat(messages, tools=self.registry.schemas())
+                response = self.fallback_provider.chat(
+                    messages, tools=self.registry.schemas()
+                )
 
             if response.is_text() or not response.tool_calls:
                 reply = response.text or "（模型未返回内容）"
@@ -102,6 +111,10 @@ class AgentLoop:
 
             # 先记录本轮 assistant 消息（原样回传 reasoning_content 等字段）。
             messages.append(self._assistant_message(response))
+
+            pending_confirm_calls: List[dict] = []
+            pending_summaries: List[str] = []
+            pending_previews: List[dict] = []
 
             for call in response.tool_calls:
                 tool = self.registry.get(call.name)
@@ -123,28 +136,36 @@ class AgentLoop:
                     )
                 seen_calls.add(call_key)
 
-                # confirm 级别：先暂停询问用户。
+                # confirm 级别：收集同一轮的全部变更，稍后合并成一次确认。
                 if tool.confirmation == "confirm":
                     preview = self.registry.preview(call.name, call.arguments, db)
-                    action_id = self.confirmation_store.create(
-                        tool_calls=[{"name": call.name, "args": call.arguments}],
-                        summary=preview.summary or f"即将执行 {call.name}",
-                        preview=preview.data,
+                    if not preview.success:
+                        messages.append(
+                            self._tool_message(
+                                call.id,
+                                call.name,
+                                False,
+                                error=preview.error or "无法生成操作预览",
+                            )
+                        )
+                        tool_call_log.append(
+                            {
+                                "name": call.name,
+                                "arguments": call.arguments,
+                                "success": False,
+                                "summary": preview.error,
+                            }
+                        )
+                        continue
+                    pending_confirm_calls.append(
+                        {"name": call.name, "args": call.arguments}
                     )
-                    return AgentResult(
-                        reply=f"需要你确认：{preview.summary}",
-                        session_id=session_id,
-                        tool_calls=tool_call_log,
-                        applied_changes=applied_changes,
-                        proposed_schedules=proposed_schedules,
-                        confirmation=ConfirmationInfo(
-                            required=True,
-                            action_id=action_id,
-                            summary=preview.summary,
-                            changes=[{"name": call.name, "arguments": call.arguments}],
-                            preview=preview.data,
-                        ),
+                    pending_summaries.append(
+                        preview.summary or f"即将执行 {call.name}"
                     )
+                    if preview.data is not None:
+                        pending_previews.append(preview.data)
+                    continue
 
                 # 执行并观察结果。
                 result = self.registry.execute(call.name, call.arguments, db)
@@ -159,7 +180,7 @@ class AgentLoop:
                     }
                 )
 
-                if result.success:
+                if result.success and tool.confirmation != "none":
                     applied_changes.append(
                         {"name": call.name, "summary": result.summary}
                     )
@@ -179,6 +200,45 @@ class AgentLoop:
                         result.data,
                         result.error,
                     )
+                )
+
+            if pending_confirm_calls:
+                if len(pending_summaries) == 1:
+                    confirmation_summary = pending_summaries[0]
+                else:
+                    confirmation_summary = (
+                        f"将执行 {len(pending_summaries)} 项操作："
+                        + "；".join(pending_summaries)
+                    )
+                combined_preview = (
+                    pending_previews[0]
+                    if len(pending_previews) == 1
+                    else {"items": pending_previews}
+                )
+                action_id = self.confirmation_store.create(
+                    tool_calls=pending_confirm_calls,
+                    summary=confirmation_summary,
+                    preview=combined_preview,
+                    session_id=session_id,
+                )
+                confirmation_reply = f"需要你确认：{confirmation_summary}"
+                self.memory.add(session_id, "assistant", confirmation_reply)
+                return AgentResult(
+                    reply=confirmation_reply,
+                    session_id=session_id,
+                    tool_calls=tool_call_log,
+                    applied_changes=applied_changes,
+                    proposed_schedules=proposed_schedules,
+                    confirmation=ConfirmationInfo(
+                        required=True,
+                        action_id=action_id,
+                        summary=confirmation_summary,
+                        changes=[
+                            {"name": item["name"], "arguments": item["args"]}
+                            for item in pending_confirm_calls
+                        ],
+                        preview=combined_preview,
+                    ),
                 )
 
             if tool_call_count >= self.MAX_TOOL_CALLS:

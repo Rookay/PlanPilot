@@ -1,30 +1,34 @@
 # PlanPilot Agent 架构设计
 
-> 本文档是 **架构设计**，不包含具体实现代码。
-> 目标：让 Agent 层独立、可替换 LLM，且不破坏现有 Task / Event / Schedule / Planning Engine。
+> 本文前半部分保留了最初的架构分析，便于说明设计演进；仓库当前实现状态以本节和 README 为准。
 
 ---
 
 ## 实施状态（已落地）
 
-架构已完成第一版实现，核心代码均可用：
+架构已完成可用版本，核心闭环如下：
 
 - ✅ Planning Engine 抽取到 `app/planning/engine.py`（generate / find_free_slots / check_conflicts / evaluate_plan）
 - ✅ 业务逻辑抽取到 `app/services/`（task / event / schedule）
-- ✅ Tool 骨架 + 22 个工具（`app/tools/`）
+- ✅ Tool 骨架 + 28 个工具（`app/tools/`）
 - ✅ Skill 系统（`app/skills/`，第一版为提示词档案）
 - ✅ Agent Loop / Context / Memory / Confirmation（`app/agent/`）
 - ✅ LLM Provider 抽象 + MockProvider + OpenAICompatibleProvider（`app/llm/`）
 - ✅ Agent API：`POST /api/agent/chat`（`app/api/agent.py`）
-- ✅ 前端对话窗口接入 Agent，支持确认/取消
-- ✅ 用户偏好存储（`user_preferences` 表）
+- ✅ 前端对话窗口接入 Agent，支持持久化会话、确认/取消和执行轨迹
+- ✅ 用户偏好真正驱动本地工作时段、午休、间隔、周末和排序策略
+- ✅ 规划批次、质量评分、安排原因、预览和整批确认
+- ✅ 重复事件、任务筛选、状态联动与手动日程冲突保护
+- ✅ Open-Meteo 天气工具 + 网络失败降级
+- ✅ 地点搜索、地址解析、路线估算接口 + 高德地图适配器
+- ✅ 标准库自动化测试覆盖核心规划与 Agent 多步流程
 
 接入真实大模型见 [docs/llm-integration.md](./llm-integration.md)。
 
 ---
 
 
-## 1. 当前项目架构分析
+## 1. 初始项目架构分析（历史快照）
 
 ### 1.1 实际目录结构（以仓库为准）
 
@@ -47,7 +51,7 @@ mine/
 │   │   ├── tasks.py           # Task CRUD
 │   │   ├── events.py          # Event CRUD
 │   │   ├── schedules.py       # Schedule + 规划算法（内嵌于此）
-│   │   └── chat.py            # 对话接口（mock 回显）
+│   │   └── agent.py           # Agent 对话、状态与持久化会话
 │   └── services/
 │       └── chat_service.py    # mock 回复（后续接模型）
 └── frontend/
@@ -58,7 +62,7 @@ mine/
 
 > 说明：任务描述里写的是 `backend/`，实际后端目录名为 `app/`。
 
-### 1.2 已实现功能
+### 1.2 初始已实现功能
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
@@ -67,25 +71,19 @@ mine/
 | Schedule | ✅ | 列表、生成、清空 proposed、PATCH 确认、删除 |
 | Calendar | ✅ | 周视图（6:00–24:00），展示 Event/Schedule/Task |
 | Planning | ✅ | 贪心排期算法，内嵌在 `app/api/schedules.py` |
-| Chat | ✅（mock） | 对话窗口 + `POST /api/chat/messages` 回显占位回复 |
+| Chat | ✅ | 对话窗口 + `POST /api/agent/chat`；支持真实模型和本地规则模式 |
 | Health | ✅ | `/health` + 数据库连通性探测 |
 
-### 1.3 尚未实现
+### 1.3 初始缺口
 
-- Event 的前端管理 UI（创建/编辑/删除事件）
-- 任何 LLM / Agent 能力
-- 独立可复用的 Planning Engine 服务（目前耦合在路由里）
-- 冲突检查 / 计划评估（作为独立函数）
-- Dynamic Replanning（目前只能「清空 proposed 后整体重排」）
-- 外部工具（天气 / 地图 / 交通时间）
-- 用户偏好 / 长期记忆
-- recurrence、task dependencies、task location
+- 上述 Event UI、Agent、Planning Engine、冲突检查、计划评估、重规划、天气、用户偏好和 recurrence 均已实现。
+- task dependencies、task location 与地图通勤属于后续可选扩展，不在当前单用户核心版本内。
 
 ---
 
-## 2. 当前系统存在的问题
+## 2. 初始系统问题与设计依据（历史快照）
 
-> 本节只记录，不在本阶段修改。
+> 本节记录重构前的问题。当前代码已处理其中的解耦、状态同步、批次字段、时区、迁移和会话问题。
 
 1. **规划引擎与 HTTP 路由耦合**：排期算法全部写在 `app/api/schedules.py` 的 `generate_schedules` 里，Agent 无法直接调用，必须经过 HTTP 自调用或复制代码。→ 后续抽取为独立 `Planning Engine`。
 2. **业务逻辑集中在路由函数**：Task/Event/Schedule 的校验、级联删除等逻辑直接写在 API 层，Tool 层未来无法复用。→ 抽取到 `services/` 层。
@@ -299,7 +297,7 @@ class ToolRegistry:
 | `evaluate_plan` | 评估计划质量/约束满足 | `plan_id?` / `schedules[]` | `score`, `issues[]` | none | Planning Engine |
 | `replan` | 动态重排 | `start?`, `keep_confirmed=true`, `new_constraints` | `proposed[]`, `removed[]`, `conflicts[]` | confirm | Planning Engine |
 
-### 5.6 未来 External Tools（同接口，暂不实现）
+### 5.6 External Tools
 
 | Tool | 说明 |
 |---|---|

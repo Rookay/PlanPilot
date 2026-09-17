@@ -6,17 +6,24 @@
 from app.tools.event_tools import (
     CreateEventTool,
     DeleteEventTool,
+    DeleteEventsTool,
     GetEventTool,
     GetEventsTool,
     UpdateEventTool,
 )
 from app.tools.external_tools import GetCurrentTimeTool, GetWeatherTool
+from app.tools.map_tools import (
+    EstimateTravelTimeTool,
+    GeocodeAddressTool,
+    SearchPlacesTool,
+)
 from app.tools.planning_tools import (
     CheckConflictsTool,
     EvaluatePlanTool,
     GeneratePlanTool,
     ReplanTool,
 )
+from app.tools.preference_tools import GetPreferencesTool, UpdatePreferencesTool
 from app.tools.registry import ToolRegistry
 from app.tools.schedule_tools import (
     CreateScheduleTool,
@@ -52,6 +59,7 @@ def build_default_registry() -> ToolRegistry:
         CreateEventTool(),
         UpdateEventTool(),
         DeleteEventTool(),
+        DeleteEventsTool(),
         # Schedule
         GetSchedulesTool(),
         FindFreeSlotsTool(),
@@ -63,9 +71,15 @@ def build_default_registry() -> ToolRegistry:
         CheckConflictsTool(),
         EvaluatePlanTool(),
         ReplanTool(),
+        # Preference
+        GetPreferencesTool(),
+        UpdatePreferencesTool(),
         # External
         GetCurrentTimeTool(),
         GetWeatherTool(),
+        SearchPlacesTool(),
+        GeocodeAddressTool(),
+        EstimateTravelTimeTool(),
     ]:
         registry.register(tool)
 

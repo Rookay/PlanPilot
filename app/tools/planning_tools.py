@@ -28,11 +28,13 @@ def _build_generate_payload(kwargs: dict) -> ScheduleGenerateRequest:
         if parsed:
             windows = parsed
 
+    gap = kwargs.get("gap_minutes")
     return ScheduleGenerateRequest(
         start=parse_naive_utc(kwargs.get("start")),
         days=int(kwargs.get("days", 7)),
         windows=windows,
-        gap_minutes=int(kwargs.get("gap_minutes", 0)),
+        gap_minutes=int(gap) if gap is not None else None,
+        strategy=kwargs.get("strategy"),
     )
 
 
@@ -65,6 +67,11 @@ class GeneratePlanTool(Tool):
                 "type": "integer",
                 "description": "相邻任务之间的最小空闲间隔（分钟），默认 0",
             },
+            "strategy": {
+                "type": "string",
+                "enum": ["balanced", "deadline_first", "priority_first"],
+                "description": "规划排序策略",
+            },
         },
         "required": [],
         "additionalProperties": False,
@@ -83,10 +90,13 @@ class GeneratePlanTool(Tool):
             data={
                 "schedules": [
                     {
+                        "id": s.id,
                         "task_id": s.task_id,
                         "start_time": s.start_time.isoformat() + "Z",
                         "end_time": s.end_time.isoformat() + "Z",
                         "status": s.status,
+                        "reason": s.reason,
+                        "plan_batch_id": s.plan_batch_id,
                     }
                     for s in result.schedules
                 ],
@@ -94,6 +104,8 @@ class GeneratePlanTool(Tool):
                     {"task_id": u.id, "title": u.title, "reason": u.reason}
                     for u in result.unscheduled
                 ],
+                "analysis": result.analysis.model_dump(),
+                "batch_id": result.batch_id,
             },
             summary=f"已生成 {len(result.schedules)} 条日程，"
             f"{len(result.unscheduled)} 个任务未能安排",
@@ -159,6 +171,10 @@ class EvaluatePlanTool(Tool):
                 },
             },
             "gap_minutes": {"type": "integer"},
+            "strategy": {
+                "type": "string",
+                "enum": ["balanced", "deadline_first", "priority_first"],
+            },
         },
         "required": [],
         "additionalProperties": False,
@@ -176,7 +192,13 @@ class EvaluatePlanTool(Tool):
 
         return ToolResult(
             success=True,
-            data={"score": evaluation.score, "issues": evaluation.issues},
+            data={
+                "score": evaluation.score,
+                "issues": evaluation.issues,
+                "scheduled_count": evaluation.scheduled_count,
+                "unscheduled_count": evaluation.unscheduled_count,
+                "scheduled_minutes": evaluation.scheduled_minutes,
+            },
             summary=f"计划评分 {evaluation.score}/100",
         )
 
@@ -204,6 +226,10 @@ class ReplanTool(Tool):
                 },
             },
             "gap_minutes": {"type": "integer"},
+            "strategy": {
+                "type": "string",
+                "enum": ["balanced", "deadline_first", "priority_first"],
+            },
         },
         "required": [],
         "additionalProperties": False,

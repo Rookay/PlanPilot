@@ -2,7 +2,8 @@
   "llm": {
     "base_url": "https://api.openai.com/v1",
     "api_key": "sk-你的密钥",
-    "model": "gpt-4o-mini"
+    "model": "gpt-4o-mini",
+    "timeout": 30
   },
   "external": {
     "weather": {
@@ -10,8 +11,13 @@
       "api_key": ""
     },
     "maps": {
-      "base_url": "",
-      "api_key": ""
+      "provider": "amap",
+      "base_url": "https://restapi.amap.com",
+      "api_key": "",
+      "timeout": 10,
+      "default_city": "上海",
+      "js_api_key": "",
+      "js_security_code": ""
     }
   }
 }

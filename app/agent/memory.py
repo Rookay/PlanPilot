@@ -11,14 +11,8 @@ from typing import Dict, List
 
 from sqlalchemy.orm import Session
 
-from app.models.preference import UserPreference
-
-DEFAULT_PREFERENCES = {
-    "work_hours": "09:00-18:00",
-    "lunch_time": "12:00-13:00",
-    "default_task_duration_min": "60",
-    "timezone": "Asia/Shanghai",
-}
+from app.schemas.preference import PreferenceUpdate
+from app.services import preference_service
 
 
 class Memory:
@@ -31,7 +25,10 @@ class Memory:
         self.add_message(session_id, {"role": role, "content": content})
 
     def add_message(self, session_id: str, message: dict) -> None:
-        self._sessions.setdefault(session_id, []).append(message)
+        history = self._sessions.setdefault(session_id, [])
+        history.append(message)
+        if len(history) > 100:
+            del history[:-100]
 
     def recent(self, session_id: str, limit: int = 20) -> List[dict]:
         history = self._sessions.get(session_id, [])
@@ -40,18 +37,19 @@ class Memory:
     def clear(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
 
+    def has_session(self, session_id: str) -> bool:
+        return session_id in self._sessions
+
+    def hydrate(self, session_id: str, messages: List[dict]) -> None:
+        """仅在内存会话不存在时恢复持久化历史。"""
+
+        if not self.has_session(session_id):
+            self._sessions[session_id] = list(messages)
+
     # ---- 长期偏好 ----
 
     def get_preferences(self, db: Session) -> dict:
-        prefs = dict(DEFAULT_PREFERENCES)
-        for row in db.query(UserPreference).all():
-            prefs[row.key] = row.value
-        return prefs
+        return preference_service.get_preferences(db).model_dump()
 
     def set_preference(self, db: Session, key: str, value: str) -> None:
-        row = db.query(UserPreference).filter(UserPreference.key == key).first()
-        if row is None:
-            db.add(UserPreference(key=key, value=value))
-        else:
-            row.value = value
-        db.commit()
+        preference_service.update_preferences(db, PreferenceUpdate(**{key: value}))

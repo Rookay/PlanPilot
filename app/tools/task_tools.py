@@ -38,9 +38,7 @@ class GetTasksTool(Tool):
         status: Optional[str] = kwargs.get("status")
         q: Optional[str] = kwargs.get("q")
 
-        tasks = task_service.list_tasks(db, status)
-        if q:
-            tasks = [t for t in tasks if q.lower() in (t.title or "").lower()]
+        tasks = task_service.list_tasks(db, status=status, q=q)
 
         return ToolResult(
             success=True,
@@ -80,13 +78,18 @@ def _build_task_payload(kwargs: dict) -> dict:
         "earliest_start": parse_naive_utc(kwargs.get("earliest_start")),
         "preferred_time": kwargs.get("preferred_time"),
         "category": kwargs.get("category"),
+        "location_id": kwargs.get("location_id"),
+        "location": kwargs.get("location"),
+        "location_city": kwargs.get("location_city"),
+        "location_longitude": kwargs.get("location_longitude"),
+        "location_latitude": kwargs.get("location_latitude"),
     }
     return payload
 
 
 class CreateTaskTool(Tool):
     name = "create_task"
-    description = "创建一条新任务。用户提到「要做某事 / 安排某个任务」时使用。"
+    description = "创建可由规划器安排或移动的任务；没有固定时刻的活动应创建为任务。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -102,6 +105,11 @@ class CreateTaskTool(Tool):
             "earliest_start": {"type": "string", "description": "ISO 8601，可选"},
             "preferred_time": {"type": "string", "description": "如 09:00"},
             "category": {"type": "string"},
+            "location_id": {"type": "integer", "description": "常用地点 id，可选"},
+            "location": {"type": "string", "description": "临时地点名称或地址"},
+            "location_city": {"type": "string"},
+            "location_longitude": {"type": "number"},
+            "location_latitude": {"type": "number"},
         },
         "required": ["title"],
         "additionalProperties": False,
@@ -143,6 +151,11 @@ class UpdateTaskTool(Tool):
             "earliest_start": {"type": "string"},
             "preferred_time": {"type": "string"},
             "category": {"type": "string"},
+            "location_id": {"type": "integer", "description": "常用地点 id，可选"},
+            "location": {"type": "string", "description": "临时地点名称或地址"},
+            "location_city": {"type": "string"},
+            "location_longitude": {"type": "number"},
+            "location_latitude": {"type": "number"},
         },
         "required": ["task_id"],
         "additionalProperties": False,

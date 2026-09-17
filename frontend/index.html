@@ -12,19 +12,24 @@
 <div class="app">
 
     <aside class="sidebar">
-        <h1>日程规划助手</h1>
+        <div class="brand">
+            <span class="brand-mark">P</span>
+            <div><h1>PlanPilot</h1><small>智能日程规划</small></div>
+        </div>
 
         <button class="primary-button sidebar-create" onclick="openTaskModal()">
             + 新建任务
         </button>
 
         <nav>
-            <button onclick="showPage('dashboard')">仪表盘</button>
-            <button onclick="showPage('tasks')">我的任务</button>
-            <button onclick="showPage('events')">固定事件</button>
-            <button onclick="showPage('calendar')">日历</button>
-            <button onclick="showPage('planning')">日程规划</button>
-            <button onclick="showPage('chat')">对话助手</button>
+            <button data-page="dashboard" class="active" onclick="showPage('dashboard')">仪表盘</button>
+            <button data-page="tasks" onclick="showPage('tasks')">我的任务</button>
+            <button data-page="events" onclick="showPage('events')">固定行程</button>
+            <button data-page="calendar" onclick="showPage('calendar')">日历</button>
+            <button data-page="itinerary" onclick="showPage('itinerary')">行程地图</button>
+            <button data-page="planning" onclick="showPage('planning')">任务安排</button>
+            <button data-page="chat" onclick="showPage('chat')">对话助手</button>
+            <button data-page="settings" onclick="showPage('settings')">规划偏好</button>
         </nav>
     </aside>
 
@@ -68,6 +73,42 @@
 
             <h3 class="section-title">最近任务</h3>
             <div id="dashboardTaskList" class="task-list compact"></div>
+
+            <h3 class="section-title">接下来</h3>
+            <div id="dashboardScheduleList" class="schedule-list"></div>
+        </section>
+
+
+        <!-- 一日行程地图 -->
+        <section id="itinerary" class="page hidden">
+            <div class="page-header">
+                <div>
+                    <h2>一日行程</h2>
+                    <p>按时间查看地点、路程和出发建议</p>
+                </div>
+                <div class="itinerary-controls">
+                    <input id="itineraryDate" type="date" onchange="loadItinerary()">
+                    <select id="itineraryMode" onchange="loadItinerary()">
+                        <option value="smart">智能推荐</option>
+                        <option value="transit">公交</option>
+                        <option value="driving">驾车</option>
+                        <option value="walking">步行</option>
+                    </select>
+                    <label class="itinerary-return"><input id="itineraryCar" type="checkbox" onchange="loadItinerary()"> 有车出发</label>
+                    <label class="itinerary-parking">停车预留<input id="itineraryParking" type="number" min="0" max="60" value="10" onchange="loadItinerary()">分钟</label>
+                    <label class="itinerary-return"><input id="itineraryReturn" type="checkbox" onchange="loadItinerary()"> 返回默认地点</label>
+                    <button class="ghost-button" onclick="setItineraryToday()">今天</button>
+                </div>
+            </div>
+
+            <div id="itineraryWarnings" class="itinerary-warnings hidden"></div>
+            <div class="itinerary-layout">
+                <div id="itineraryTimeline" class="itinerary-timeline"></div>
+                <div class="map-panel">
+                    <div id="itineraryMap" class="itinerary-map"></div>
+                    <div id="mapFallback" class="map-fallback hidden"></div>
+                </div>
+            </div>
         </section>
 
 
@@ -86,6 +127,29 @@
             </div>
 
 
+            <div class="filter-bar">
+                <input id="taskSearch" type="search" placeholder="搜索任务" oninput="applyTaskFilters()">
+                <select id="taskStatusFilter" onchange="applyTaskFilters()">
+                    <option value="">全部状态</option>
+                    <option value="pending">待完成</option>
+                    <option value="in_progress">进行中</option>
+                    <option value="completed">已完成</option>
+                    <option value="cancelled">已取消</option>
+                </select>
+                <select id="taskPriorityFilter" onchange="applyTaskFilters()">
+                    <option value="">全部优先级</option>
+                    <option value="high">高优先级</option>
+                    <option value="medium">中优先级</option>
+                    <option value="low">低优先级</option>
+                </select>
+                <select id="taskSort" onchange="applyTaskFilters()">
+                    <option value="created_desc">最近创建</option>
+                    <option value="deadline_asc">截止时间</option>
+                    <option value="duration_asc">任务时长</option>
+                    <option value="title_asc">名称排序</option>
+                </select>
+            </div>
+
             <div id="taskList" class="task-list">
                 <!-- JavaScript 动态生成 -->
             </div>
@@ -93,16 +157,16 @@
         </section>
 
 
-        <!-- 固定事件 -->
+        <!-- 固定行程 -->
         <section id="events" class="page hidden">
             <div class="page-header">
                 <div>
-                    <h2>固定事件</h2>
-                    <p>管理会议、约会和其它不能自动移动的时间块</p>
+                    <h2>固定行程</h2>
+                    <p>管理会议、预约、车次等不能自动移动的时间块</p>
                 </div>
 
                 <button class="primary-button" onclick="openEventModal()">
-                    + 新建事件
+                    + 新建固定行程
                 </button>
             </div>
 
@@ -120,7 +184,7 @@
                 </div>
 
                 <div class="calendar-nav">
-                    <button class="primary-button" onclick="openEventModal()">+ 事件</button>
+                    <button class="primary-button" onclick="openEventModal()">+ 固定行程</button>
                     <button class="ghost-button" onclick="previousWeek()">‹ 上一周</button>
                     <span class="week-label"></span>
                     <button class="ghost-button" onclick="goToday()">今天</button>
@@ -129,9 +193,9 @@
             </div>
 
             <div class="legend">
-                <span class="legend-item"><i class="dot dot-event"></i>事件</span>
-                <span class="legend-item"><i class="dot dot-schedule"></i>未确认日程</span>
-                <span class="legend-item"><i class="dot dot-accepted"></i>已确认日程</span>
+                <span class="legend-item"><i class="dot dot-event"></i>固定行程</span>
+                <span class="legend-item"><i class="dot dot-schedule"></i>待确认任务安排</span>
+                <span class="legend-item"><i class="dot dot-accepted"></i>已确认任务安排</span>
                 <span class="legend-item"><i class="dot dot-task"></i>待安排任务</span>
             </div>
 
@@ -146,12 +210,12 @@
             <div class="page-header">
                 <div>
                     <h2>对话助手</h2>
-                    <p class="muted">和 AI 助手聊聊你的日程安排</p>
+                    <p class="muted">和助手聊聊任务、冲突和日程安排</p>
                 </div>
-
-                <button class="ghost-button" onclick="clearChat()">
-                    清空对话
-                </button>
+                <div class="header-actions">
+                    <span id="agentStatus" class="status-badge">正在检测</span>
+                    <button class="ghost-button" onclick="clearChat()">清空对话</button>
+                </div>
             </div>
 
             <div id="chatMessages" class="chat-messages">
@@ -178,15 +242,20 @@
                 <button class="ghost-button" onclick="confirmChatDecision('reject')">取消</button>
             </div>
 
+            <details id="agentTrace" class="agent-trace hidden">
+                <summary>本次执行记录</summary>
+                <div id="agentTraceContent"></div>
+            </details>
+
         </section>
 
 
-        <!-- 日程规划 -->
+        <!-- 任务安排 -->
         <section id="planning" class="page hidden">
 
             <div class="page-header">
                 <div>
-                    <h2>日程规划</h2>
+                    <h2>任务安排</h2>
                     <p class="muted">自动把任务安排到未来 7 天的空闲时间</p>
                 </div>
 
@@ -205,6 +274,16 @@
                 </label>
 
                 <label>
+                    规划策略
+                    <select id="planStrategy">
+                        <option value="">使用偏好设置</option>
+                        <option value="balanced">均衡安排</option>
+                        <option value="deadline_first">截止优先</option>
+                        <option value="priority_first">优先级优先</option>
+                    </select>
+                </label>
+
+                <label>
                     天数
                     <input id="planDays" type="number" min="1" max="30" value="7">
                 </label>
@@ -218,19 +297,130 @@
                     开始规划
                 </button>
 
+                <button class="ghost-button" onclick="previewSchedule()">
+                    预览评分
+                </button>
+
+                <button id="acceptAllButton" class="ghost-button" onclick="acceptAllSchedules()">
+                    全部确认
+                </button>
+
                 <button class="ghost-button" onclick="clearSchedules()">
-                    清空未确认日程
+                    清空待确认安排
                 </button>
             </div>
 
             <div id="planningTimetable" class="timetable-host"></div>
 
+            <div id="planAnalysis" class="plan-analysis hidden"></div>
             <div id="scheduleResult"></div>
 
         </section>
 
+        <!-- 规划偏好 -->
+        <section id="settings" class="page hidden">
+            <div class="page-header">
+                <div>
+                    <h2>规划偏好</h2>
+                    <p>这些设置会同时影响自动规划和对话助手</p>
+                </div>
+                <button class="primary-button" onclick="savePreferences()">保存设置</button>
+            </div>
+
+            <div class="settings-layout">
+                <section class="settings-section">
+                    <h3>时间范围</h3>
+                    <div class="form-grid">
+                        <label>时区<input id="prefTimezone" value="Asia/Shanghai"></label>
+                        <label>默认城市<input id="prefLocation" placeholder="例如：南京"></label>
+                        <label>工作开始<input id="prefWorkStart" type="time"></label>
+                        <label>工作结束<input id="prefWorkEnd" type="time"></label>
+                        <label>午休开始<input id="prefLunchStart" type="time"></label>
+                        <label>午休结束<input id="prefLunchEnd" type="time"></label>
+                        <label class="check-label"><input id="prefWeekends" type="checkbox"> 周末也安排任务</label>
+                    </div>
+                </section>
+                <section class="settings-section">
+                    <h3>默认规则</h3>
+                    <div class="form-grid">
+                        <label>默认任务时长（分钟）<input id="prefDuration" type="number" min="5" max="1440"></label>
+                        <label>任务间隔（分钟）<input id="prefGap" type="number" min="0" max="240"></label>
+                        <label>规划策略
+                            <select id="prefStrategy">
+                                <option value="balanced">均衡安排</option>
+                                <option value="deadline_first">截止优先</option>
+                                <option value="priority_first">优先级优先</option>
+                            </select>
+                        </label>
+                    </div>
+                </section>
+                <section class="settings-section location-settings">
+                    <h3>常用地点</h3>
+                    <div class="location-manager">
+                        <div class="location-form">
+                            <div class="form-grid">
+                                <label>地点名称<input id="locationLabel" maxlength="50" placeholder="例如：家"></label>
+                                <label>所在城市<input id="locationCity" maxlength="100" placeholder="例如：上海"></label>
+                                <label class="form-span">详细地址<input id="locationAddress" maxlength="200" placeholder="街道、门牌号或建筑名称"></label>
+                                <label>经度<input id="locationLongitude" type="number" min="-180" max="180" step="0.000001" placeholder="121.473701"></label>
+                                <label>纬度<input id="locationLatitude" type="number" min="-90" max="90" step="0.000001" placeholder="31.230416"></label>
+                                <label class="check-label"><input id="locationDefault" type="checkbox"> 设为默认出发点</label>
+                            </div>
+                            <div class="location-form-actions">
+                                <button class="ghost-button" type="button" onclick="useBrowserLocation()">使用当前位置</button>
+                                <button class="ghost-button" type="button" onclick="resolveLocationAddress()">解析地址</button>
+                                <button id="locationCancelButton" class="ghost-button hidden" type="button" onclick="resetLocationForm()">取消编辑</button>
+                                <button id="locationSaveButton" class="primary-button" type="button" onclick="saveLocation()">添加地点</button>
+                            </div>
+                        </div>
+                        <div id="locationFeedback" class="feedback hidden"></div>
+                        <div id="locationList" class="location-list"></div>
+                    </div>
+                </section>
+            </div>
+            <div id="settingsFeedback" class="feedback hidden"></div>
+        </section>
+
     </main>
 
+</div>
+
+
+<!-- 日历事项详情 -->
+
+<div id="calendarDetailModal" class="modal hidden" onclick="handleCalendarDetailBackdrop(event)">
+    <div class="modal-content calendar-detail-modal" role="dialog" aria-modal="true" aria-labelledby="calendarDetailTitle">
+        <div class="calendar-detail-header">
+            <div>
+                <span id="calendarDetailBadge" class="calendar-detail-badge"></span>
+                <h2 id="calendarDetailTitle"></h2>
+            </div>
+            <button class="modal-close-button" type="button" aria-label="关闭" title="关闭" onclick="closeCalendarItemDetails()">×</button>
+        </div>
+
+        <div id="calendarDetailMeta" class="calendar-detail-meta"></div>
+
+        <section id="calendarDetailDescriptionSection" class="calendar-detail-section hidden">
+            <h3>备注</h3>
+            <p id="calendarDetailDescription"></p>
+        </section>
+
+        <section id="calendarDetailLocationSection" class="calendar-detail-section hidden">
+            <div class="calendar-detail-location-heading">
+                <h3>地点</h3>
+                <span id="calendarDetailLocationText"></span>
+            </div>
+            <div class="calendar-detail-map-shell">
+                <div id="calendarDetailMap" class="calendar-detail-map"></div>
+                <div id="calendarDetailMapFallback" class="calendar-detail-map-fallback hidden"></div>
+            </div>
+        </section>
+
+        <div class="modal-buttons calendar-detail-actions">
+            <button type="button" onclick="closeCalendarItemDetails()">关闭</button>
+            <button id="calendarDetailEditButton" class="primary-button" type="button" onclick="editCalendarDetailItem()">编辑</button>
+        </div>
+    </div>
 </div>
 
 
@@ -317,6 +507,39 @@
                 placeholder="例如：学习 / 工作 / 生活">
         </label>
 
+        <div class="modal-location-editor">
+            <div class="modal-location-heading">
+                <strong>地点</strong>
+                <button class="text-button" type="button" onclick="clearModalLocation('task')">清空</button>
+            </div>
+            <label>
+                常用地点
+                <select id="taskLocationId" onchange="selectSavedLocationForForm('task')">
+                    <option value="">不指定地点</option>
+                </select>
+            </label>
+            <div class="location-search-row">
+                <input id="taskLocationSearch" type="search" placeholder="搜索地点，例如：新街口地铁站"
+                       onkeydown="handleLocationSearchKey(event, 'task')">
+                <button class="ghost-button" type="button" onclick="searchModalLocation('task')">搜索</button>
+            </div>
+            <div id="taskLocationCandidates" class="location-candidates hidden"></div>
+            <label>
+                地点名称
+                <input id="taskLocation" type="text" maxlength="200" placeholder="可直接输入或从搜索结果选择"
+                       oninput="markCustomLocation('task')">
+            </label>
+            <details class="coordinate-fields">
+                <summary>城市与精确坐标</summary>
+                <div class="form-grid">
+                    <label>城市<input id="taskLocationCity" maxlength="100" oninput="markCustomLocation('task')"></label>
+                    <span></span>
+                    <label>经度<input id="taskLocationLongitude" type="number" min="-180" max="180" step="0.000001" oninput="markCustomLocation('task')"></label>
+                    <label>纬度<input id="taskLocationLatitude" type="number" min="-90" max="90" step="0.000001" oninput="markCustomLocation('task')"></label>
+                </div>
+            </details>
+        </div>
+
 
         <div class="modal-buttons">
 
@@ -338,16 +561,16 @@
 </div>
 
 
-<!-- 新建 / 编辑事件弹窗 -->
+<!-- 新建 / 编辑固定行程弹窗 -->
 
 <div id="eventModal" class="modal hidden">
 
     <div class="modal-content">
 
-        <h2 id="eventModalTitle">新建事件</h2>
+        <h2 id="eventModalTitle">新建固定行程</h2>
 
         <label>
-            事件名称
+            行程名称
             <input
                 id="eventTitle"
                 type="text"
@@ -358,7 +581,7 @@
             描述
             <textarea
                 id="eventDescription"
-                placeholder="事件描述"></textarea>
+                placeholder="行程描述"></textarea>
         </label>
 
         <label>
@@ -372,12 +595,94 @@
         </label>
 
         <label>
-            地点
-            <input
-                id="eventLocation"
-                type="text"
-                placeholder="例如：公司 / 线上会议">
+            行程类型
+            <select id="eventType" onchange="toggleEventLocationMode()">
+                <option value="activity">普通活动</option>
+                <option value="travel">赶路</option>
+            </select>
         </label>
+
+        <div id="eventOriginLocationEditor" class="modal-location-editor hidden">
+            <div class="modal-location-heading">
+                <strong>出发地</strong>
+                <button class="text-button" type="button" onclick="clearModalLocation('eventOrigin')">清空</button>
+            </div>
+            <label>
+                常用地点
+                <select id="eventOriginLocationId" onchange="selectSavedLocationForForm('eventOrigin')">
+                    <option value="">自动继承上一地点</option>
+                </select>
+            </label>
+            <div class="location-search-row">
+                <input id="eventOriginLocationSearch" type="search" placeholder="搜索出发地"
+                       onkeydown="handleLocationSearchKey(event, 'eventOrigin')">
+                <button class="ghost-button" type="button" onclick="searchModalLocation('eventOrigin')">搜索</button>
+            </div>
+            <div id="eventOriginLocationCandidates" class="location-candidates hidden"></div>
+            <label>
+                地点名称
+                <input id="eventOriginLocation" type="text" maxlength="200" placeholder="可留空并继承上一地点"
+                       oninput="markCustomLocation('eventOrigin')">
+            </label>
+            <details class="coordinate-fields">
+                <summary>城市与精确坐标</summary>
+                <div class="form-grid">
+                    <label>城市<input id="eventOriginLocationCity" maxlength="100" oninput="markCustomLocation('eventOrigin')"></label>
+                    <span></span>
+                    <label>经度<input id="eventOriginLocationLongitude" type="number" min="-180" max="180" step="0.000001" oninput="markCustomLocation('eventOrigin')"></label>
+                    <label>纬度<input id="eventOriginLocationLatitude" type="number" min="-90" max="90" step="0.000001" oninput="markCustomLocation('eventOrigin')"></label>
+                </div>
+            </details>
+        </div>
+
+        <div class="modal-location-editor">
+            <div class="modal-location-heading">
+                <strong id="eventDestinationHeading">地点</strong>
+                <button class="text-button" type="button" onclick="clearModalLocation('event')">清空</button>
+            </div>
+            <label>
+                常用地点
+                <select id="eventLocationId" onchange="selectSavedLocationForForm('event')">
+                    <option value="">不绑定常用地点</option>
+                </select>
+            </label>
+            <div class="location-search-row">
+                <input id="eventLocationSearch" type="search" placeholder="搜索地点，例如：南京南站南广场"
+                       onkeydown="handleLocationSearchKey(event, 'event')">
+                <button class="ghost-button" type="button" onclick="searchModalLocation('event')">搜索</button>
+            </div>
+            <div id="eventLocationCandidates" class="location-candidates hidden"></div>
+            <label>
+                地点名称
+                <input id="eventLocation" type="text" maxlength="200" placeholder="可直接输入或从搜索结果选择"
+                       oninput="markCustomLocation('event')">
+            </label>
+            <details class="coordinate-fields">
+                <summary>城市与精确坐标</summary>
+                <div class="form-grid">
+                    <label>城市<input id="eventLocationCity" maxlength="100" oninput="markCustomLocation('event')"></label>
+                    <span></span>
+                    <label>经度<input id="eventLocationLongitude" type="number" min="-180" max="180" step="0.000001" oninput="markCustomLocation('event')"></label>
+                    <label>纬度<input id="eventLocationLatitude" type="number" min="-90" max="90" step="0.000001" oninput="markCustomLocation('event')"></label>
+                </div>
+            </details>
+        </div>
+
+        <div class="form-grid recurrence-fields">
+            <label>
+                重复
+                <select id="eventRecurrence" onchange="toggleRecurrenceFields()">
+                    <option value="">不重复</option>
+                    <option value="daily">每天</option>
+                    <option value="weekdays">每个工作日</option>
+                    <option value="weekly">每周</option>
+                </select>
+            </label>
+            <label id="eventOccurrencesLabel" class="hidden">
+                次数
+                <input id="eventOccurrences" type="number" min="2" max="52" value="4">
+            </label>
+        </div>
 
         <div class="modal-buttons">
 
@@ -389,7 +694,7 @@
                 id="eventSubmitButton"
                 class="primary-button"
                 onclick="submitEvent()">
-                创建事件
+                创建固定行程
             </button>
 
         </div>

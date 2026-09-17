@@ -11,7 +11,16 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.api import agent, chat, events, schedules, tasks
+from app.api import (
+    agent,
+    events,
+    itineraries,
+    locations,
+    maps,
+    preferences,
+    schedules,
+    tasks,
+)
 from app.database import (
     DATABASE_FILE,
     DATABASE_URL,
@@ -49,8 +58,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(
-    title="Schedule Planner API",
-    version="0.2.0",
+    title="PlanPilot API",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -82,8 +91,11 @@ async def _sqlalchemy_error_handler(_request: Request, exc: SQLAlchemyError):
 app.include_router(tasks.router)
 app.include_router(events.router)
 app.include_router(schedules.router)
-app.include_router(chat.router)
 app.include_router(agent.router)
+app.include_router(preferences.router)
+app.include_router(maps.router)
+app.include_router(locations.router)
+app.include_router(itineraries.router)
 
 # 把前端目录作为静态文件托管：打开 http://127.0.0.1:8000/frontend/ 即可使用。
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -94,9 +106,9 @@ if _FRONTEND_DIR.exists():
 @app.get("/")
 def root():
     return {
-        "name": "Schedule Planner API",
-        "version": "0.2.0",
-        "database": DATABASE_URL,
+        "name": "PlanPilot API",
+        "version": "1.0.0",
+        "database": "sqlite" if DATABASE_FILE is not None else "external",
         "frontend": "/frontend/",
     }
 

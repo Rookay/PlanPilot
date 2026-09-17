@@ -1,13 +1,20 @@
 # -*- coding: UTF-8 -*-
 # Project ：mine
 # File    ：events.py
+from datetime import datetime
 from typing import List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.schemas.event import EventCreate, EventResponse, EventUpdate
+from app.schemas.event import (
+    EventCreate,
+    EventResponse,
+    EventSeriesCreate,
+    EventSeriesResponse,
+    EventUpdate,
+)
 from app.services import event_service
 
 router = APIRouter(
@@ -26,9 +33,20 @@ def create_event(
 
 @router.get("", response_model=List[EventResponse])
 def get_events(
+    start: datetime | None = Query(default=None),
+    end: datetime | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    return event_service.list_events(db)
+    return event_service.list_events(db, start, end)
+
+
+@router.post("/series", response_model=EventSeriesResponse)
+def create_event_series(
+    event_data: EventSeriesCreate,
+    db: Session = Depends(get_db),
+):
+    events = event_service.create_event_series(db, event_data)
+    return EventSeriesResponse(events=events, created=len(events))
 
 
 @router.get("/{event_id}", response_model=EventResponse)

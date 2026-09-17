@@ -96,6 +96,98 @@ def ensure_schema(target_engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE tasks ADD COLUMN start_time DATETIME"
             )
+        if columns and "location_id" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE tasks ADD COLUMN location_id INTEGER"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_tasks_location_id ON tasks (location_id)"
+            )
+        task_location_additions = {
+            "location": "VARCHAR(200)",
+            "location_city": "VARCHAR(100)",
+            "location_longitude": "FLOAT",
+            "location_latitude": "FLOAT",
+        }
+        for name, sql_type in task_location_additions.items():
+            if columns and name not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}"
+                )
+
+        event_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(events)")
+        }
+        if event_columns and "location_id" not in event_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE events ADD COLUMN location_id INTEGER"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_events_location_id ON events (location_id)"
+            )
+        if event_columns and "event_type" not in event_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE events ADD COLUMN event_type VARCHAR(20) "
+                "NOT NULL DEFAULT 'activity'"
+            )
+        event_location_additions = {
+            "location_city": "VARCHAR(100)",
+            "location_longitude": "FLOAT",
+            "location_latitude": "FLOAT",
+            "origin_location": "VARCHAR(200)",
+            "origin_location_id": "INTEGER",
+            "origin_location_city": "VARCHAR(100)",
+            "origin_location_longitude": "FLOAT",
+            "origin_location_latitude": "FLOAT",
+        }
+        for name, sql_type in event_location_additions.items():
+            if event_columns and name not in event_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE events ADD COLUMN {name} {sql_type}"
+                )
+        if event_columns:
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_events_origin_location_id "
+                "ON events (origin_location_id)"
+            )
+
+        schedule_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(schedules)")
+        }
+        schedule_additions = {
+            "plan_batch_id": "VARCHAR(32)",
+            "reason": "TEXT",
+            "updated_at": "DATETIME",
+        }
+        for name, sql_type in schedule_additions.items():
+            if schedule_columns and name not in schedule_columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE schedules ADD COLUMN {name} {sql_type}"
+                )
+        if schedule_columns:
+            connection.exec_driver_sql(
+                "UPDATE schedules SET updated_at = created_at WHERE updated_at IS NULL"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_schedules_plan_batch_id "
+                "ON schedules (plan_batch_id)"
+            )
+
+        chat_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(chat_messages)")
+        }
+        if chat_columns and "session_id" not in chat_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE chat_messages ADD COLUMN session_id VARCHAR(64) DEFAULT 'legacy'"
+            )
+        if chat_columns:
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_chat_messages_session_id "
+                "ON chat_messages (session_id)"
+            )
 
 
 def check_database() -> bool:
