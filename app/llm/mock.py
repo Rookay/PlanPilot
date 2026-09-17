@@ -80,6 +80,18 @@ class MockProvider(LLMProvider):
         wants_delete_events = any(word in last_user for word in ("删除", "清空")) and any(
             word in last_user for word in ("事件", "行程", "出去玩", "固定安排")
         )
+        recent_assistant_context = "\n".join(
+            str(item.get("content") or "")
+            for item in messages[-12:]
+            if item.get("role") == "assistant"
+        )
+        adjusts_recent_trip = any(
+            phrase in last_user
+            for phrase in ("调整", "改一下", "不要迟到", "别迟到", "延后")
+        ) and any(
+            phrase in recent_assistant_context
+            for phrase in ("固定行程冲突", "会迟到", "段行程", "旅行行程")
+        )
 
         if wants_undo_plan and "undo_latest_plan" not in executed:
             return LLMResponse(
@@ -121,6 +133,15 @@ class MockProvider(LLMProvider):
                         ]
                     )
                 return LLMResponse(text="没有找到名称匹配的固定事件，请再说明要删除的事件名称。")
+
+        if adjusts_recent_trip:
+            return LLMResponse(
+                text=(
+                    "我记得你是在调整刚才的旅行行程。真实模型当前暂时不可用，"
+                    "本地规则模式不会贸然改动多段时间；请点击“重新连接”后再次发送这句话。"
+                    "现有行程和冲突信息都还保留着。"
+                )
+            )
 
         if wants_weather and "get_weather" not in executed:
             target = utcnow().date()

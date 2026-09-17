@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.integrations.maps.base import MapIntegrationError
-from app.integrations.maps.schemas import Coordinate, RouteOption, TravelMode
+from app.integrations.maps.schemas import Coordinate, RouteOption, TravelMode as RouteMode
 from app.integrations.maps.service import get_map_service
 from app.models.event import Event
 from app.models.location import SavedLocation
@@ -23,6 +23,7 @@ from app.schemas.itinerary import (
     ItineraryLocation,
     ItineraryMode,
 )
+from app.schemas.event import TravelMode as EventTravelMode
 from app.services import location_service, preference_service
 
 
@@ -56,6 +57,7 @@ def get_daily_itinerary(
                 end_time=event.end_time,
                 status="fixed",
                 event_type=event.event_type,
+                travel_mode=event.travel_mode,
                 origin_location=(
                     _location_model(locations.get(event.origin_location_id))
                     or _custom_location(
@@ -149,6 +151,7 @@ def get_daily_itinerary(
                         origin=travel_origin,
                         destination=item,
                         departure_base=item.start_time,
+                        preferred_mode=item.travel_mode,
                     )
                 )
         elif previous_location is not None:
@@ -165,6 +168,7 @@ def get_daily_itinerary(
                         departure_base=(
                             previous_item.end_time if previous_item else None
                         ),
+                        preferred_mode=None,
                     )
                 )
 
@@ -208,30 +212,42 @@ def get_daily_itinerary(
             parking_minutes,
         )
     else:
-        legs = [
-            _build_leg(
-                origin_id=request.origin_id,
-                origin=request.origin,
-                destination=request.destination,
-                departure_base=request.departure_base,
-                mode=mode,
-                map_service=map_service,
-                parking_minutes=(
-                    parking_minutes
-                    if mode == "driving" and not request.is_return
-                    else 0
-                ),
-                recommendation_reason=(
-                    f"已计入 {parking_minutes} 分钟停车预留"
-                    if mode == "driving" and not request.is_return
-                    else None
-                ),
-                car_location_after=(
-                    request.destination.location.label if mode == "driving" else None
-                ),
+        legs = []
+        for request in requests:
+            display_mode: EventTravelMode = request.preferred_mode or mode
+            leg_mode = _route_mode(display_mode)
+            taxi_trip = display_mode == "taxi"
+            parking = (
+                parking_minutes
+                if leg_mode == "driving"
+                and not taxi_trip
+                and not request.is_return
+                else 0
             )
-            for request in requests
-        ]
+            legs.append(
+                _build_leg(
+                    origin_id=request.origin_id,
+                    origin=request.origin,
+                    destination=request.destination,
+                    departure_base=request.departure_base,
+                    mode=leg_mode,
+                    display_mode=display_mode,
+                    map_service=map_service,
+                    parking_minutes=parking,
+                    recommendation_reason=(
+                        "该赶路段指定打车，采用高德驾车路线"
+                        if taxi_trip
+                        else f"已计入 {parking_minutes} 分钟停车预留"
+                        if parking
+                        else None
+                    ),
+                    car_location_after=(
+                        request.destination.location.label
+                        if display_mode == "driving"
+                        else None
+                    ),
+                )
+            )
 
     for request, leg in zip(requests, legs):
         if request.is_return:
@@ -260,6 +276,7 @@ class _LegRequest:
     origin: ItineraryLocation
     destination: ItineraryItem
     departure_base: Optional[datetime]
+    preferred_mode: Optional[EventTravelMode] = None
     is_return: bool = False
 
 
@@ -272,8 +289,10 @@ def _build_smart_legs(
     if not requests:
         return []
 
-    modes: List[TravelMode] = ["walking", "transit"]
-    if car_available:
+    modes: List[RouteMode] = ["walking", "transit"]
+    if car_available or any(
+        item.preferred_mode in ("driving", "taxi") for item in requests
+    ):
         modes.append("driving")
     candidates = _load_route_candidates(requests, modes, map_service)
 
@@ -318,13 +337,19 @@ def _build_smart_legs(
         ] = {}
 
         for car_position, (previous_cost, previous_legs) in states.items():
-            for candidate_mode in ("walking", "transit", "driving"):
+            candidate_modes = (
+                (_route_mode(request.preferred_mode),)
+                if request.preferred_mode is not None
+                else ("walking", "transit", "driving")
+            )
+            for candidate_mode in candidate_modes:
                 route = candidates.get((index, candidate_mode))
                 retrieval_minutes = 0
+                taxi_trip = request.preferred_mode == "taxi"
                 if candidate_mode == "driving":
-                    if car_position is None:
+                    if car_position is None and not taxi_trip:
                         continue
-                    if car_position != origin_key:
+                    if not taxi_trip and car_position != origin_key:
                         cache_key = (origin_key, car_position, destination_key)
                         if cache_key not in retrieval_cache:
                             retrieval_cache[cache_key] = _route_via_parked_car(
@@ -341,21 +366,27 @@ def _build_smart_legs(
                     continue
 
                 next_car_position = (
-                    destination_key if candidate_mode == "driving" else car_position
+                    destination_key
+                    if candidate_mode == "driving" and not taxi_trip
+                    else car_position
                 )
                 parking = (
                     parking_minutes
-                    if candidate_mode == "driving" and not request.is_return
+                    if candidate_mode == "driving" and not taxi_trip and not request.is_return
                     else 0
                 )
-                reason = _smart_reason(
-                    candidate_mode,
-                    parking,
-                    car_position,
-                    origin_key,
-                    destination_key,
-                    request.origin.label,
-                    retrieval_minutes,
+                reason = (
+                    "该赶路段指定打车，采用高德驾车路线"
+                    if taxi_trip
+                    else _smart_reason(
+                        candidate_mode,
+                        parking,
+                        car_position,
+                        origin_key,
+                        destination_key,
+                        request.origin.label,
+                        retrieval_minutes,
+                    )
                 )
                 leg = _build_leg(
                     origin_id=request.origin_id,
@@ -363,6 +394,7 @@ def _build_smart_legs(
                     destination=request.destination,
                     departure_base=request.departure_base,
                     mode=candidate_mode,
+                    display_mode=request.preferred_mode or candidate_mode,
                     map_service=None,
                     route_option=route,
                     allow_lookup=False,
@@ -387,7 +419,8 @@ def _build_smart_legs(
                     origin=request.origin,
                     destination=request.destination,
                     departure_base=request.departure_base,
-                    mode="transit",
+                    mode=_route_mode(request.preferred_mode or "transit"),
+                    display_mode=request.preferred_mode or "transit",
                     map_service=None,
                     allow_lookup=False,
                     recommendation_reason="路线暂不可用，未完成智能推荐",
@@ -410,18 +443,23 @@ def _build_smart_legs(
 
 def _load_route_candidates(
     requests: List[_LegRequest],
-    modes: List[TravelMode],
+    modes: List[RouteMode],
     map_service,
-) -> Dict[Tuple[int, TravelMode], RouteOption]:
+) -> Dict[Tuple[int, RouteMode], RouteOption]:
     if map_service is None:
         return {}
 
-    results: Dict[Tuple[int, TravelMode], RouteOption] = {}
+    results: Dict[Tuple[int, RouteMode], RouteOption] = {}
     jobs = {}
     with ThreadPoolExecutor(max_workers=3) as executor:
         for index, request in enumerate(requests):
             assert request.destination.location is not None
-            for mode in modes:
+            request_modes = (
+                [_route_mode(request.preferred_mode)]
+                if request.preferred_mode is not None
+                else modes
+            )
+            for mode in request_modes:
                 if request.origin.coordinate == request.destination.location.coordinate:
                     results[(index, mode)] = RouteOption(
                         distance_m=0,
@@ -450,7 +488,7 @@ def _fastest_route(
     map_service,
     origin: ItineraryLocation,
     destination: ItineraryLocation,
-    mode: TravelMode,
+    mode: RouteMode,
 ) -> Optional[RouteOption]:
     try:
         response = map_service.get_routes(
@@ -495,7 +533,7 @@ def _route_via_parked_car(
 
 
 def _smart_reason(
-    mode: TravelMode,
+    mode: RouteMode,
     parking_minutes: int,
     car_position: Optional[Tuple[float, float]],
     origin_key: Tuple[float, float],
@@ -540,8 +578,9 @@ def _build_leg(
     origin: ItineraryLocation,
     destination: ItineraryItem,
     departure_base: Optional[datetime],
-    mode: TravelMode,
+    mode: RouteMode,
     map_service,
+    display_mode: Optional[EventTravelMode] = None,
     route_option: Optional[RouteOption] = None,
     allow_lookup: bool = True,
     parking_minutes: int = 0,
@@ -623,6 +662,7 @@ def _build_leg(
         origin_id=origin_id,
         destination_id=destination.id,
         mode=mode,
+        display_mode=display_mode or mode,
         distance_m=distance,
         duration_minutes=duration,
         suggested_departure=suggested_departure,
@@ -635,6 +675,10 @@ def _build_leg(
         recommendation_reason=recommendation_reason,
         car_location_after=car_location_after,
     )
+
+
+def _route_mode(mode: EventTravelMode) -> RouteMode:
+    return "driving" if mode == "taxi" else mode
 
 
 def _location_model(location: Optional[SavedLocation]) -> Optional[ItineraryLocation]:

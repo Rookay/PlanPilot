@@ -7,6 +7,8 @@ from app.agent.agent import Agent
 from app.agent.loop import AgentLoop
 from app.agent.memory import Memory
 from app.llm.mock import MockProvider
+from app.integrations.maps.base import MapNotConfiguredError
+from app.integrations.maps.schemas import RouteOption, RouteResponse
 from app.schemas.schedule import ScheduleGenerateRequest
 from app.schemas.event import EventCreate
 from app.schemas.task import TaskCreate
@@ -194,6 +196,7 @@ class AgentLoopTests(TestCase):
                 "start_time": "2026-09-27T02:10:00Z",
                 "end_time": "2026-09-27T02:30:00Z",
                 "event_type": "travel",
+                "travel_mode": "transit",
                 "origin_location": "马鞍山东站",
                 "origin_location_city": "马鞍山",
                 "origin_location_longitude": 118.55,
@@ -230,7 +233,11 @@ class AgentLoopTests(TestCase):
             skill_registry=build_default_skills(),
         )
 
-        pending = agent.handle(self.db, "安排马鞍山第一天行程", "trip-session")
+        with patch(
+            "app.tools.event_tools.get_map_service",
+            side_effect=MapNotConfiguredError("not configured"),
+        ):
+            pending = agent.handle(self.db, "安排马鞍山第一天行程", "trip-session")
 
         self.assertTrue(pending.confirmation.required)
         self.assertEqual(len(pending.confirmation.preview["events"]), 3)
@@ -250,6 +257,71 @@ class AgentLoopTests(TestCase):
         self.assertIn("已创建 3 段行程", completed.reply)
         created = event_service.list_events(self.db)
         self.assertEqual([item.event_type for item in created], ["activity", "travel", "activity"])
+        self.assertEqual(created[1].travel_mode, "transit")
+
+    def test_travel_itinerary_preview_rejects_short_route_before_confirmation(self):
+        class FakeMapService:
+            def get_routes(self, origin, destination, mode, city):
+                return RouteResponse(
+                    provider="fake",
+                    origin=origin,
+                    destination=destination,
+                    routes=[RouteOption(distance_m=8000, duration_minutes=30, mode=mode)],
+                )
+
+        with patch(
+            "app.tools.event_tools.get_map_service",
+            return_value=FakeMapService(),
+        ):
+            preview = build_default_registry().preview(
+                "create_events",
+                {
+                    "events": [
+                        {
+                            "title": "午饭",
+                            "start_time": "2026-09-27T03:00:00Z",
+                            "end_time": "2026-09-27T04:00:00Z",
+                            "event_type": "activity",
+                            "location": "金鹰购物中心",
+                            "location_city": "马鞍山",
+                            "location_longitude": 118.50,
+                            "location_latitude": 31.69,
+                        },
+                        {
+                            "title": "前往采石矶",
+                            "start_time": "2026-09-27T04:00:00Z",
+                            "end_time": "2026-09-27T04:20:00Z",
+                            "event_type": "travel",
+                            "travel_mode": "driving",
+                            "location": "采石矶",
+                            "location_city": "马鞍山",
+                            "location_longitude": 118.42,
+                            "location_latitude": 31.65,
+                        },
+                    ]
+                },
+                self.db,
+            )
+
+        self.assertFalse(preview.success)
+        self.assertIn("迟到 10 分钟", preview.error)
+
+    def test_mock_fallback_keeps_recent_trip_context(self):
+        response = MockProvider().chat(
+            [
+                {"role": "user", "content": "安排马鞍山第一天行程"},
+                {
+                    "role": "assistant",
+                    "content": "已创建 11 段行程，复查发现固定行程冲突，会迟到 21 分钟。",
+                },
+                {"role": "user", "content": "那调整一下时间，不要迟到"},
+            ],
+            tools=[],
+        )
+
+        self.assertIn("刚才的旅行行程", response.text)
+        self.assertIn("重新连接", response.text)
+        self.assertNotIn("可用工具", response.text)
 
     def test_travel_itinerary_preview_rejects_existing_conflict(self):
         event_service.create_event(

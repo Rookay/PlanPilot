@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from app.integrations.maps.base import MapIntegrationError
 from app.integrations.maps.schemas import Coordinate
 from app.planning.engine import PlanAssignment, PlanTask
+from app.schemas.event import TravelMode as EventTravelMode
 
 
 MAX_CONTINUOUS_GAP = timedelta(hours=12)
@@ -38,6 +39,7 @@ class LocatedBlock:
     location: PlanningLocation
     fixed: bool = True
     travel: bool = False
+    travel_mode: Optional[EventTravelMode] = None
 
 
 class TravelConstraintChecker:
@@ -86,7 +88,11 @@ class TravelConstraintChecker:
                 return False
 
         if following is not None:
-            required = self._travel_minutes(location, following.location)
+            required = self._travel_minutes(
+                location,
+                following.location,
+                following.travel_mode or "transit",
+            )
             departure = max(end, following.start) if following.travel else end
             deadline = following.end if following.travel else following.start
             available = _minutes_between(departure, deadline)
@@ -141,7 +147,13 @@ class TravelConstraintChecker:
             gap = deadline - departure
             if gap < timedelta(0) or gap > MAX_CONTINUOUS_GAP:
                 continue
-            required = self._travel_minutes(previous.location, following.location)
+            required = self._travel_minutes(
+                previous.location,
+                following.location,
+                (following.travel_mode or "transit")
+                if following.travel
+                else "transit",
+            )
             available = _minutes_between(departure, deadline)
             if required is None or required <= available:
                 continue
@@ -154,12 +166,15 @@ class TravelConstraintChecker:
         return list(dict.fromkeys(issues))
 
     def _travel_minutes(
-        self, origin: PlanningLocation, destination: PlanningLocation
+        self,
+        origin: PlanningLocation,
+        destination: PlanningLocation,
+        mode: EventTravelMode = "transit",
     ) -> Optional[int]:
         if origin.key == destination.key:
             return 0
         city = origin.city or destination.city
-        key = (origin.key, destination.key, city)
+        key = (origin.key, destination.key, city, mode)
         if key in self._route_cache:
             return self._route_cache[key]
         if self.map_service is None:
@@ -170,7 +185,7 @@ class TravelConstraintChecker:
             response = self.map_service.get_routes(
                 origin.coordinate,
                 destination.coordinate,
-                "transit",
+                "driving" if mode == "taxi" else mode,
                 city,
             )
             durations = [route.duration_minutes for route in response.routes]

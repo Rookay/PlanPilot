@@ -7,10 +7,17 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.integrations.maps.base import MapIntegrationError
+from app.integrations.maps.service import get_map_service
 from app.models.event import Event
 from app.models.schedule import Schedule
 from app.schemas.event import EventCreate, EventSeriesCreate, EventUpdate
 from app.services import event_service
+from app.services.travel_planning_service import (
+    LocatedBlock,
+    PlanningLocation,
+    TravelConstraintChecker,
+)
 from app.tools.base import Tool, ToolResult
 from app.tools.serializers import event_to_dict
 from app.utils import parse_naive_utc
@@ -78,6 +85,11 @@ class CreateEventTool(Tool):
                 "enum": ["activity", "travel"],
                 "description": "普通活动用 activity；时间段本身用于从出发地赶往目的地时用 travel",
             },
+            "travel_mode": {
+                "type": "string",
+                "enum": ["walking", "driving", "taxi", "transit"],
+                "description": "赶路方式：步行 walking、自驾 driving、打车 taxi、公交/地铁 transit",
+            },
             "description": {"type": "string"},
             "location": {"type": "string"},
             "location_id": {"type": "integer", "description": "常用地点 id，可选"},
@@ -107,6 +119,7 @@ class CreateEventTool(Tool):
             "start_time": parse_naive_utc(kwargs["start_time"]),
             "end_time": parse_naive_utc(kwargs["end_time"]),
             "event_type": kwargs.get("event_type", "activity"),
+            "travel_mode": kwargs.get("travel_mode"),
             "description": kwargs.get("description"),
             "location": kwargs.get("location"),
             "location_id": kwargs.get("location_id"),
@@ -150,13 +163,19 @@ class CreateEventsTool(Tool):
     description = (
         "一次性创建一组按时间排列的固定行程，并在执行前让用户统一确认。"
         "明确日期的旅行、游玩、接站等多地点日程必须使用本工具；"
-        "赶路段用 event_type=travel，游览、用餐、入住等用 activity。"
+        "赶路段用 event_type=travel，并填写与路线查询一致的 travel_mode；"
+        "游览、用餐、入住等用 activity。工具会在确认前复核每段路线时间。"
     )
     _event_properties = {
         "title": {"type": "string"},
         "start_time": {"type": "string", "description": "ISO 8601 UTC"},
         "end_time": {"type": "string", "description": "ISO 8601 UTC"},
         "event_type": {"type": "string", "enum": ["activity", "travel"]},
+        "travel_mode": {
+            "type": "string",
+            "enum": ["walking", "driving", "taxi", "transit"],
+            "description": "event_type=travel 时必填；打车填 taxi，但 estimate_travel_time 使用 driving",
+        },
         "description": {"type": "string"},
         "location": {"type": "string"},
         "location_id": {"type": "integer"},
@@ -208,6 +227,9 @@ class CreateEventsTool(Tool):
             conflict = self._existing_conflict(db, payloads)
             if conflict:
                 return ToolResult(success=False, error=conflict)
+            route_issues = self._route_issues(payloads)
+            if route_issues:
+                return ToolResult(success=False, error="；".join(route_issues))
             events = event_service.create_events(db, payloads)
         except Exception as exc:  # noqa: BLE001
             return ToolResult(success=False, error=str(exc))
@@ -229,6 +251,9 @@ class CreateEventsTool(Tool):
             conflict = self._existing_conflict(db, payloads)
             if conflict:
                 return ToolResult(success=False, error=conflict)
+            route_issues = self._route_issues(payloads)
+            if route_issues:
+                return ToolResult(success=False, error="；".join(route_issues))
         except Exception as exc:  # noqa: BLE001
             return ToolResult(success=False, error=str(exc))
 
@@ -283,6 +308,37 @@ class CreateEventsTool(Tool):
                     return f"行程「{candidate.title}」与已有安排「{title}」时间冲突"
         return None
 
+    @staticmethod
+    def _route_issues(payloads: list[EventCreate]) -> list[str]:
+        blocks = []
+        for index, item in enumerate(payloads):
+            if item.location_longitude is None or item.location_latitude is None:
+                continue
+            blocks.append(
+                LocatedBlock(
+                    key=f"candidate-event-{index}",
+                    title=item.title,
+                    start=item.start_time,
+                    end=item.end_time,
+                    location=PlanningLocation(
+                        label=item.location or item.title,
+                        city=item.location_city,
+                        longitude=item.location_longitude,
+                        latitude=item.location_latitude,
+                    ),
+                    travel=item.event_type == "travel",
+                    travel_mode=item.travel_mode,
+                )
+            )
+        if len(blocks) < 2:
+            return []
+        try:
+            map_service = get_map_service()
+        except MapIntegrationError:
+            return []
+        checker = TravelConstraintChecker(map_service, blocks, {})
+        return checker.sequence_issues([])
+
 
 class UpdateEventTool(Tool):
     name = "update_event"
@@ -296,6 +352,10 @@ class UpdateEventTool(Tool):
             "start_time": {"type": "string"},
             "end_time": {"type": "string"},
             "event_type": {"type": "string", "enum": ["activity", "travel"]},
+            "travel_mode": {
+                "type": "string",
+                "enum": ["walking", "driving", "taxi", "transit"],
+            },
             "location": {"type": "string"},
             "location_id": {"type": "integer", "description": "常用地点 id，可选"},
             "location_city": {"type": "string"},

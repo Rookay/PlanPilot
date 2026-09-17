@@ -178,6 +178,10 @@ def update_event(db: Session, event_id: int, data: EventUpdate) -> Event:
         event.origin_location_city = None
     for key, value in update_data.items():
         setattr(event, key, value)
+    if event.event_type == "travel" and event.travel_mode is None:
+        event.travel_mode = "transit"
+    if event.event_type != "travel":
+        event.travel_mode = None
     _validate_coordinates(event.location_longitude, event.location_latitude)
     _validate_coordinates(
         event.origin_location_longitude,

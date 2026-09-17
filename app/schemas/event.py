@@ -7,6 +7,7 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 EventType = Literal["activity", "travel"]
+TravelMode = Literal["walking", "driving", "taxi", "transit"]
 
 
 class EventBase(BaseModel):
@@ -16,6 +17,7 @@ class EventBase(BaseModel):
     start_time: datetime
     end_time: datetime
     event_type: EventType = "activity"
+    travel_mode: Optional[TravelMode] = None
 
     location: Optional[str] = Field(default=None, max_length=200)
     location_id: Optional[int] = Field(default=None, ge=1)
@@ -59,6 +61,10 @@ class EventBase(BaseModel):
             self.origin_location_latitude is None
         ):
             raise ValueError("出发地经度和纬度必须同时提供")
+        if self.event_type == "travel" and self.travel_mode is None:
+            self.travel_mode = "transit"
+        if self.event_type != "travel":
+            self.travel_mode = None
         return self
 
 
@@ -73,6 +79,7 @@ class EventUpdate(BaseModel):
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     event_type: Optional[EventType] = None
+    travel_mode: Optional[TravelMode] = None
 
     location: Optional[str] = Field(default=None, max_length=200)
     location_id: Optional[int] = Field(default=None, ge=1)

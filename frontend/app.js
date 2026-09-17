@@ -731,6 +731,7 @@ function renderEventItem(event) {
   const savedOrigin = locationById(event.origin_location_id);
   if (event.event_type === "travel") {
     meta.push("类型：赶路");
+    meta.push(`方式：${travelModeName(event.travel_mode)}`);
     const origin = savedOrigin?.label || event.origin_location || "继承上一地点";
     const destination = savedLocation?.label || event.location || "未指定目的地";
     meta.push(`路线：${origin} → ${destination}`);
@@ -775,6 +776,7 @@ function openEventModal(id = null) {
       $("eventStartTime").value = toDateTimeLocalValue(event.start_time);
       $("eventEndTime").value = toDateTimeLocalValue(event.end_time);
       $("eventType").value = event.event_type || "activity";
+      $("eventTravelMode").value = event.travel_mode || "transit";
       setModalLocationFields("event", event);
       setModalLocationFields("eventOrigin", event);
       toggleEventLocationMode();
@@ -803,6 +805,7 @@ function clearEventForm() {
   $("eventStartTime").value = "";
   $("eventEndTime").value = "";
   $("eventType").value = "activity";
+  $("eventTravelMode").value = "transit";
   clearModalLocation("event");
   clearModalLocation("eventOrigin");
   toggleEventLocationMode();
@@ -819,6 +822,7 @@ function toggleRecurrenceFields() {
 function toggleEventLocationMode() {
   const isTravel = $("eventType")?.value === "travel";
   $("eventOriginLocationEditor")?.classList.toggle("hidden", !isTravel);
+  $("eventTravelModeLabel")?.classList.toggle("hidden", !isTravel);
   if ($("eventDestinationHeading")) {
     $("eventDestinationHeading").textContent = isTravel ? "目的地" : "地点";
   }
@@ -860,6 +864,7 @@ async function submitEvent() {
     start_time: new Date(startValue).toISOString(),
     end_time: new Date(endValue).toISOString(),
     event_type: $("eventType").value,
+    travel_mode: isTravel ? $("eventTravelMode").value : null,
     ...location,
     ...originLocation,
   };
@@ -986,7 +991,7 @@ function renderItineraryTimeline() {
         ? "路线待计算"
         : leg.duration_minutes === 0
           ? "同一地点，无需移动"
-          : `${travelModeName(leg.mode)} ${leg.duration_minutes} 分钟${leg.parking_minutes ? `（含停车 ${leg.parking_minutes} 分钟）` : ""}${leg.distance_m === null ? "" : ` · ${formatDistance(leg.distance_m)}`}`;
+          : `${travelModeName(leg.display_mode || leg.mode)} ${leg.duration_minutes} 分钟${leg.parking_minutes ? `（含停车 ${leg.parking_minutes} 分钟）` : ""}${leg.distance_m === null ? "" : ` · ${formatDistance(leg.distance_m)}`}`;
       const departText = leg.suggested_departure
         ? `建议 ${formatTime(parseDate(leg.suggested_departure))} 出发`
         : "";
@@ -1028,7 +1033,7 @@ function renderItineraryTimeline() {
   if (returnLeg && itinerary.origin) {
     const routeText = returnLeg.duration_minutes === null
       ? "返程路线待计算"
-      : `${travelModeName(returnLeg.mode)} ${returnLeg.duration_minutes} 分钟${returnLeg.distance_m === null ? "" : ` · ${formatDistance(returnLeg.distance_m)}`}`;
+      : `${travelModeName(returnLeg.display_mode || returnLeg.mode)} ${returnLeg.duration_minutes} 分钟${returnLeg.distance_m === null ? "" : ` · ${formatDistance(returnLeg.distance_m)}`}`;
     rows.push(`
       <div class="itinerary-leg return-leg">
         <span>${escapeHtml(routeText)}</span>
@@ -1044,7 +1049,13 @@ function renderItineraryTimeline() {
 }
 
 function travelModeName(mode) {
-  return { smart: "智能推荐", transit: "公交", driving: "驾车", walking: "步行" }[mode] || mode;
+  return {
+    smart: "智能推荐",
+    transit: "公交 / 地铁",
+    taxi: "打车",
+    driving: "自驾",
+    walking: "步行",
+  }[mode] || mode;
 }
 
 function handleItineraryItemKey(event, itemId) {
@@ -1979,6 +1990,7 @@ function buildCalendarItemDetail(kind, id) {
         ["日期", calendarDateText(start)],
         ["时间", calendarTimeRange(start, end)],
         ["时长", calendarDurationText(start, end)],
+        ...(isTravel ? [["交通方式", travelModeName(event.travel_mode)]] : []),
       ],
       locationText,
       locations: isTravel ? [origin, destination].filter(Boolean) : [destination].filter(Boolean),
@@ -2671,7 +2683,7 @@ function renderChatConfirmationPreview(preview) {
       ? `${formatDate(start)} ${formatTime(start)}–${formatTime(end)}`
       : "";
     const route = event.event_type === "travel" && event.origin_location
-      ? `${event.origin_location} → ${event.location || "目的地"}`
+      ? `${travelModeName(event.travel_mode)} · ${event.origin_location} → ${event.location || "目的地"}`
       : event.location || "";
     return `
       <div class="chat-confirm-item">

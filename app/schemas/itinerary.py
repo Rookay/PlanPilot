@@ -6,7 +6,8 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from app.integrations.maps.schemas import Coordinate, TravelMode
+from app.integrations.maps.schemas import Coordinate, TravelMode as RouteMode
+from app.schemas.event import TravelMode as EventTravelMode
 
 ItineraryMode = Literal["smart", "walking", "driving", "transit"]
 
@@ -29,6 +30,7 @@ class ItineraryItem(BaseModel):
     end_time: datetime
     status: str
     event_type: Literal["activity", "travel"] = "activity"
+    travel_mode: Optional[EventTravelMode] = None
     origin_location: Optional[ItineraryLocation] = None
     location: Optional[ItineraryLocation] = None
 
@@ -36,7 +38,8 @@ class ItineraryItem(BaseModel):
 class ItineraryLeg(BaseModel):
     origin_id: str
     destination_id: str
-    mode: TravelMode
+    mode: RouteMode
+    display_mode: EventTravelMode
     distance_m: Optional[int] = None
     duration_minutes: Optional[int] = None
     suggested_departure: Optional[datetime] = None

@@ -13,6 +13,7 @@ llm = from_config() or MockProvider()
 
 - `config.json` 里配了 `llm.base_url`（或设置了 `LLM_BASE_URL`）→ 使用真实模型
 - 未配置 → 使用 `MockProvider`（本地规则模式，可完成常见查询与规划）
+- 在线模型临时失败 → 保留完整消息历史切换到 `MockProvider`；涉及刚生成的多段旅行调整时会说明连接状态并等待重连，不会脱离上下文贸然改动
 
 `OpenAICompatibleProvider` 用标准库 `urllib` 调用 OpenAI 兼容的 `/chat/completions` 接口，
 支持 **function calling（tools）** 和 **JSON 模式（response_format）**，不依赖任何 SDK。

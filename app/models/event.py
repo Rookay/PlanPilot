@@ -33,6 +33,7 @@ class Event(Base):
         nullable=False,
         default="activity",
     )
+    travel_mode = Column(String(20), nullable=True)
 
     location = Column(
         String(200),

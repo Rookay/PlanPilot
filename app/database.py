@@ -134,6 +134,10 @@ def ensure_schema(target_engine) -> None:
                 "ALTER TABLE events ADD COLUMN event_type VARCHAR(20) "
                 "NOT NULL DEFAULT 'activity'"
             )
+        if event_columns and "travel_mode" not in event_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE events ADD COLUMN travel_mode VARCHAR(20)"
+            )
         event_location_additions = {
             "location_city": "VARCHAR(100)",
             "location_longitude": "FLOAT",
@@ -150,6 +154,42 @@ def ensure_schema(target_engine) -> None:
                     f"ALTER TABLE events ADD COLUMN {name} {sql_type}"
                 )
         if event_columns:
+            walking_match = "title LIKE '%步行%'"
+            taxi_match = "title LIKE '%打车%'"
+            driving_match = "title LIKE '%驾车%'"
+            if "description" in event_columns:
+                walking_match += (
+                    " OR (description LIKE '%步行%' AND description NOT LIKE '%公交%' "
+                    "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%打车%' "
+                    "AND description NOT LIKE '%驾车%')"
+                )
+                taxi_match += (
+                    " OR (description LIKE '%打车%' AND description NOT LIKE '%公交%' "
+                    "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%驾车%')"
+                )
+                driving_match += (
+                    " OR (description LIKE '%驾车%' AND description NOT LIKE '%公交%' "
+                    "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%打车%')"
+                )
+            connection.exec_driver_sql(
+                "UPDATE events SET travel_mode = 'walking' "
+                "WHERE event_type = 'travel' AND travel_mode IS NULL "
+                f"AND ({walking_match})"
+            )
+            connection.exec_driver_sql(
+                "UPDATE events SET travel_mode = 'taxi' "
+                "WHERE event_type = 'travel' AND travel_mode IS NULL "
+                f"AND ({taxi_match})"
+            )
+            connection.exec_driver_sql(
+                "UPDATE events SET travel_mode = 'driving' "
+                "WHERE event_type = 'travel' AND travel_mode IS NULL "
+                f"AND ({driving_match})"
+            )
+            connection.exec_driver_sql(
+                "UPDATE events SET travel_mode = 'transit' "
+                "WHERE event_type = 'travel' AND travel_mode IS NULL"
+            )
             connection.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_events_origin_location_id "
                 "ON events (origin_location_id)"

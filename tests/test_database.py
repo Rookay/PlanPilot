@@ -40,6 +40,7 @@ class DatabaseMigrationTests(TestCase):
         self.assertIn("location_id", task_columns)
         self.assertIn("location_id", event_columns)
         self.assertIn("event_type", event_columns)
+        self.assertIn("travel_mode", event_columns)
         self.assertTrue(
             {"location", "location_city", "location_longitude", "location_latitude"}
             <= task_columns
@@ -69,3 +70,25 @@ class DatabaseMigrationTests(TestCase):
                 "SELECT updated_at FROM schedules WHERE id = 1"
             ).scalar_one()
         self.assertIsNotNone(updated_at)
+
+    def test_legacy_travel_mode_distinguishes_taxi_from_ambiguous_options(self):
+        engine = create_engine("sqlite://", future=True)
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE events ("
+                "id INTEGER PRIMARY KEY, title VARCHAR(200), description TEXT, "
+                "event_type VARCHAR(20))"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO events VALUES "
+                "(1, '打车前往景区', '约 20 分钟', 'travel'), "
+                "(2, '前往公园', '公交约 50 分钟；打车约 25 分钟', 'travel')"
+            )
+
+        ensure_schema(engine)
+
+        with engine.connect() as connection:
+            modes = connection.exec_driver_sql(
+                "SELECT travel_mode FROM events ORDER BY id"
+            ).scalars().all()
+        self.assertEqual(modes, ["taxi", "transit"])

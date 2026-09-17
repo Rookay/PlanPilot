@@ -45,6 +45,7 @@ def event_to_dict(event) -> dict:
         "start_time": _iso(event.start_time),
         "end_time": _iso(event.end_time),
         "event_type": event.event_type,
+        "travel_mode": event.travel_mode,
         "location": event.location,
         "location_id": event.location_id,
         "location_city": event.location_city,

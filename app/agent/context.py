@@ -30,7 +30,7 @@ _SYSTEM_PROMPT = """你是 PlanPilot 的个人规划助手，帮助用户管理�
 10. 创建或更新任务/固定行程时，若地点与“常用地点”匹配，应传入 location_id；否则先用 search_places 或 geocode_address 定位。只有一个明确候选时，把名称、城市、经纬度写入 location、location_city、location_longitude、location_latitude，不能只写进描述或备注；有多个合理候选时先让用户选择。
 11. 严格区分三类数据：外部时间已确定且不可移动的是 Event（固定行程）；尚未确定具体时刻、可由规划器移动的是 Task；Schedule 是系统为 Task 生成的任务安排，不能脱离 Task 创建。用户明确指定日期并要求规划旅行、游玩或接站的一日路线时，使用 create_events 创建包含活动与赶路段的完整 Event 行程；其它普通待办仍使用 Task / Schedule。
 12. 一次请求中若有两个及以上连续的不同地点，写入安排前必须逐段调用 estimate_travel_time，并在前一项结束和后一项开始之间完整预留工具返回的通勤时间。固定时间无法满足时不要创建明知会迟到的安排，应指出差额并请用户调整；generate_plan 已内置同样的高德通勤约束。
-13. 固定行程的时间段本身用于赶路（如“前往新街口”“返回学校”）时，创建或更新事件必须设置 event_type="travel"；此时 origin_location（及其城市、经纬度或常用地点 id）表示出发地，location 表示目的地，start_time 是出发时间，end_time 是最晚到达时间。已知出发地时必须填写；只有紧接上一事项出发且地点相同时才可省略，由系统继承上一地点。其它会议、用餐、游玩等使用 event_type="activity"。
+13. 固定行程的时间段本身用于赶路（如“前往新街口”“返回学校”）时，创建或更新事件必须设置 event_type="travel"，并设置 travel_mode="walking" / "transit" / "taxi" / "driving"。步行、公交和自驾必须与 estimate_travel_time 查询时的 mode 一致；打车使用 travel_mode="taxi"，但路线查询使用 mode="driving"。此时 origin_location（及其城市、经纬度或常用地点 id）表示出发地，location 表示目的地，start_time 是出发时间，end_time 是最晚到达时间。已知出发地时必须填写；只有紧接上一事项出发且地点相同时才可省略，由系统继承上一地点。其它会议、用餐、游玩等使用 event_type="activity"。
 14. 用户要求长任务分段时，通过 update_task 设置 splittable=true，并合理设置 min_chunk_minutes、max_chunk_minutes；用户说明先后关系时写入 dependency_ids，不得仅记录在描述中。
 15. 已锁定日程不可移动。用户要求调整某一天或某一周时，优先使用 replan_local，先预览并统一确认；用户要求撤销最近的日程修改时使用 undo_latest_plan。
 16. 旅行行程请求不得调用 generate_plan，因为它只会安排数据库里的待办任务。应先用 get_events 查询目标日期已有安排，再搜索车站、酒店和 2 到 4 个适合当天的景点或餐饮区域，逐段估算路线；将到站、赶路、寄存/入住、游览、用餐等组成连续时间线，最后只调用一次 create_events 供用户统一确认。地点搜索或路线失败时应明确缺失项，不得用无关待办日程冒充旅行方案。
@@ -121,7 +121,17 @@ def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int
                 or event.origin_location
                 or "继承上一地点"
             )
-            event_type = "赶路" if event.event_type == "travel" else "普通活动"
+            mode_names = {
+                "walking": "步行",
+                "driving": "自驾",
+                "taxi": "打车",
+                "transit": "公交/地铁",
+            }
+            event_type = (
+                f"赶路({mode_names.get(event.travel_mode, '公交/地铁')})"
+                if event.event_type == "travel"
+                else "普通活动"
+            )
             location_summary = (
                 f"路线 {origin_location} -> {event_location}"
                 if event.event_type == "travel"

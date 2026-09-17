@@ -688,6 +688,7 @@ def _fixed_travel_blocks(
                     end=to_naive_utc(event.end_time),
                     location=location,
                     travel=event.event_type == "travel",
+                    travel_mode=event.travel_mode,
                 )
             )
     statuses = tuple(schedule_statuses)

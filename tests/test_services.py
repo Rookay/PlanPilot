@@ -190,6 +190,55 @@ class ServiceTests(TestCase):
             any("固定行程冲突" in issue and "迟到 35 分钟" in issue for issue in result.analysis.issues)
         )
 
+    def test_plan_audit_uses_saved_travel_mode(self):
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="午饭",
+                start_time=datetime(2026, 9, 27, 3),
+                end_time=datetime(2026, 9, 27, 4),
+                location="金鹰购物中心",
+                location_city="马鞍山",
+                location_longitude=118.50,
+                location_latitude=31.69,
+            ),
+        )
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="前往采石矶",
+                start_time=datetime(2026, 9, 27, 4),
+                end_time=datetime(2026, 9, 27, 4, 25),
+                event_type="travel",
+                travel_mode="driving",
+                location="采石矶",
+                location_city="马鞍山",
+                location_longitude=118.42,
+                location_latitude=31.65,
+            ),
+        )
+        requested_modes = []
+
+        class FakeMapService:
+            def get_routes(self, origin, destination, mode, city):
+                requested_modes.append(mode)
+                duration = 20 if mode == "driving" else 50
+                return RouteResponse(
+                    provider="fake",
+                    origin=origin,
+                    destination=destination,
+                    routes=[RouteOption(distance_m=8000, duration_minutes=duration, mode=mode)],
+                )
+
+        with patch(
+            "app.services.schedule_service.get_map_service",
+            return_value=FakeMapService(),
+        ):
+            result = schedule_service.audit_current_plan(self.db)
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(requested_modes, ["driving"])
+
     def test_task_completion_and_cancellation_sync_schedule(self):
         task = task_service.create_task(self.db, TaskCreate(title="实验"))
         schedule = Schedule(
@@ -489,6 +538,69 @@ class ServiceTests(TestCase):
         self.assertTrue(all(value == 118.80 for value in route_origins))
         self.assertEqual(travel_leg.origin_id, f"{travel.id}:origin")
         self.assertEqual(travel_leg.suggested_departure, travel.start_time)
+
+    def test_itinerary_displays_taxi_while_using_driving_route(self):
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="酒店寄存行李",
+                start_time=datetime(2026, 9, 27, 2),
+                end_time=datetime(2026, 9, 27, 2, 30),
+                location="酒店",
+                location_city="马鞍山",
+                location_longitude=118.50,
+                location_latitude=31.69,
+            ),
+        )
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="打车前往金鹰",
+                start_time=datetime(2026, 9, 27, 2, 30),
+                end_time=datetime(2026, 9, 27, 2, 40),
+                event_type="travel",
+                travel_mode="taxi",
+                location="金鹰购物中心",
+                location_city="马鞍山",
+                location_longitude=118.505,
+                location_latitude=31.692,
+            ),
+        )
+        requested_modes = []
+
+        class FakeMapService:
+            def get_routes(self, origin, destination, mode, city):
+                requested_modes.append(mode)
+                return RouteResponse(
+                    provider="fake",
+                    origin=origin,
+                    destination=destination,
+                    routes=[
+                        RouteOption(
+                            distance_m=500,
+                            duration_minutes=7,
+                            mode=mode,
+                            path=[origin, destination],
+                        )
+                    ],
+                )
+
+        with patch(
+            "app.services.itinerary_service.get_map_service",
+            return_value=FakeMapService(),
+        ):
+            result = itinerary_service.get_daily_itinerary(
+                self.db,
+                datetime(2026, 9, 27).date(),
+                mode="smart",
+            )
+
+        self.assertEqual(result.items[-1].travel_mode, "taxi")
+        self.assertEqual(result.legs[-1].mode, "driving")
+        self.assertEqual(result.legs[-1].display_mode, "taxi")
+        self.assertEqual(result.legs[-1].parking_minutes, 0)
+        self.assertIn("指定打车", result.legs[-1].recommendation_reason)
+        self.assertEqual(requested_modes, ["driving"])
 
     def test_task_dependencies_reject_cycles(self):
         first = task_service.create_task(self.db, TaskCreate(title="任务A"))
