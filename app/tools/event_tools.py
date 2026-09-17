@@ -7,6 +7,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.models.event import Event
+from app.models.schedule import Schedule
 from app.schemas.event import EventCreate, EventSeriesCreate, EventUpdate
 from app.services import event_service
 from app.tools.base import Tool, ToolResult
@@ -16,10 +18,13 @@ from app.utils import parse_naive_utc
 
 class GetEventsTool(Tool):
     name = "get_events"
-    description = "查询固定行程（不可移动的外部约束，如会议、预约、车次）。"
+    description = "查询固定行程（不可移动的外部约束，如会议、预约、车次），可限定时间范围。"
     input_schema = {
         "type": "object",
-        "properties": {},
+        "properties": {
+            "start": {"type": "string", "description": "范围开始时间 ISO 8601 UTC"},
+            "end": {"type": "string", "description": "范围结束时间 ISO 8601 UTC"},
+        },
         "required": [],
         "additionalProperties": False,
     }
@@ -27,7 +32,11 @@ class GetEventsTool(Tool):
     confirmation = "none"
 
     def execute(self, db: Session, **kwargs: Any) -> ToolResult:
-        events = event_service.list_events(db)
+        events = event_service.list_events(
+            db,
+            start=parse_naive_utc(kwargs.get("start")),
+            end=parse_naive_utc(kwargs.get("end")),
+        )
         return ToolResult(
             success=True,
             data=[event_to_dict(e) for e in events],
@@ -134,6 +143,145 @@ class CreateEventTool(Tool):
             data=event_to_dict(event),
             summary=f"已创建事件「{event.title}」",
         )
+
+
+class CreateEventsTool(Tool):
+    name = "create_events"
+    description = (
+        "一次性创建一组按时间排列的固定行程，并在执行前让用户统一确认。"
+        "明确日期的旅行、游玩、接站等多地点日程必须使用本工具；"
+        "赶路段用 event_type=travel，游览、用餐、入住等用 activity。"
+    )
+    _event_properties = {
+        "title": {"type": "string"},
+        "start_time": {"type": "string", "description": "ISO 8601 UTC"},
+        "end_time": {"type": "string", "description": "ISO 8601 UTC"},
+        "event_type": {"type": "string", "enum": ["activity", "travel"]},
+        "description": {"type": "string"},
+        "location": {"type": "string"},
+        "location_id": {"type": "integer"},
+        "location_city": {"type": "string"},
+        "location_longitude": {"type": "number"},
+        "location_latitude": {"type": "number"},
+        "origin_location": {"type": "string"},
+        "origin_location_id": {"type": "integer"},
+        "origin_location_city": {"type": "string"},
+        "origin_location_longitude": {"type": "number"},
+        "origin_location_latitude": {"type": "number"},
+    }
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "events": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 30,
+                "items": {
+                    "type": "object",
+                    "properties": _event_properties,
+                    "required": ["title", "start_time", "end_time", "event_type"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["events"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
+    confirmation = "confirm"
+
+    @staticmethod
+    def _payloads(kwargs: dict) -> list[EventCreate]:
+        payloads = []
+        for raw in kwargs.get("events") or []:
+            values = dict(raw)
+            values["start_time"] = parse_naive_utc(values.get("start_time"))
+            values["end_time"] = parse_naive_utc(values.get("end_time"))
+            payloads.append(EventCreate(**values))
+        if not payloads:
+            raise ValueError("至少需要一个行程项")
+        return payloads
+
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            payloads = self._payloads(kwargs)
+            conflict = self._existing_conflict(db, payloads)
+            if conflict:
+                return ToolResult(success=False, error=conflict)
+            events = event_service.create_events(db, payloads)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        return ToolResult(
+            success=True,
+            data={"events": [event_to_dict(item) for item in events]},
+            summary=f"已创建 {len(events)} 段行程",
+        )
+
+    def preview(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            payloads = sorted(self._payloads(kwargs), key=lambda item: item.start_time)
+            for previous, current in zip(payloads, payloads[1:]):
+                if current.start_time < previous.end_time:
+                    return ToolResult(
+                        success=False,
+                        error=f"行程「{previous.title}」与「{current.title}」时间重叠",
+                    )
+            conflict = self._existing_conflict(db, payloads)
+            if conflict:
+                return ToolResult(success=False, error=conflict)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+
+        preview = []
+        for item in payloads:
+            preview.append(
+                {
+                    **item.model_dump(
+                        exclude={
+                            "description",
+                            "location_id",
+                            "origin_location_id",
+                        }
+                    ),
+                    "start_time": item.start_time.isoformat() + "Z",
+                    "end_time": item.end_time.isoformat() + "Z",
+                }
+            )
+        titles = "、".join(item.title for item in payloads)
+        return ToolResult(
+            success=True,
+            needs_confirmation=True,
+            data={"events": preview},
+            summary=f"将添加 {len(payloads)} 段行程：{titles}",
+        )
+
+    @staticmethod
+    def _existing_conflict(db: Session, payloads: list[EventCreate]) -> str | None:
+        if not payloads:
+            return None
+        range_start = min(item.start_time for item in payloads)
+        range_end = max(item.end_time for item in payloads)
+        existing = [
+            (item.title, item.start_time, item.end_time)
+            for item in db.query(Event)
+            .filter(Event.start_time < range_end, Event.end_time > range_start)
+            .all()
+        ]
+        existing.extend(
+            (f"任务安排 #{item.id}", item.start_time, item.end_time)
+            for item in db.query(Schedule)
+            .filter(
+                Schedule.status.in_(("accepted", "proposed")),
+                Schedule.start_time < range_end,
+                Schedule.end_time > range_start,
+            )
+            .all()
+        )
+        for candidate in payloads:
+            for title, start, end in existing:
+                if candidate.start_time < end and start < candidate.end_time:
+                    return f"行程「{candidate.title}」与已有安排「{title}」时间冲突"
+        return None
 
 
 class UpdateEventTool(Tool):

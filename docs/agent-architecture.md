@@ -10,7 +10,7 @@
 
 - ✅ Planning Engine 抽取到 `app/planning/engine.py`（generate / find_free_slots / check_conflicts / evaluate_plan）
 - ✅ 业务逻辑抽取到 `app/services/`（task / event / schedule）
-- ✅ Tool 骨架 + 30 个工具（`app/tools/`）
+- ✅ Tool 骨架 + 31 个工具（`app/tools/`）
 - ✅ Skill 系统（`app/skills/`，第一版为提示词档案）
 - ✅ Agent Loop / Context / Memory / Confirmation（`app/agent/`）
 - ✅ LLM Provider 抽象 + MockProvider + OpenAICompatibleProvider（`app/llm/`）
@@ -27,6 +27,7 @@
 - ✅ Agent 多工具确认批次的原子回滚与执行后计划审计
 - ✅ 日历拖动/缩放前的冲突与相邻地点通勤校验
 - ✅ 模型连接故障自动降级、代理失败直连重试与用户主动重连
+- ✅ 旅行意图独立路由、逐段地图验证、批量行程预览与原子写入
 
 接入真实大模型见 [docs/llm-integration.md](./llm-integration.md)。
 

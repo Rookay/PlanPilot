@@ -332,7 +332,7 @@ class AgentLoop:
             return "读取"
         if name in {"evaluate_plan", "check_conflicts", "estimate_travel_time"}:
             return "验证"
-        if name in {"generate_plan", "replan", "replan_local"}:
+        if name in {"generate_plan", "replan", "replan_local", "create_events"}:
             return "规划"
         return "执行"
 

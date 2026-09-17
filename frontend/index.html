@@ -238,9 +238,14 @@
             </div>
 
             <div id="chatConfirmBar" class="chat-confirm-bar hidden">
-                <span id="chatConfirmSummary"></span>
-                <button class="ghost-button" onclick="confirmChatDecision('accept')">确认</button>
-                <button class="ghost-button" onclick="confirmChatDecision('reject')">取消</button>
+                <div class="chat-confirm-content">
+                    <strong id="chatConfirmSummary"></strong>
+                    <div id="chatConfirmPreview" class="chat-confirm-preview"></div>
+                </div>
+                <div class="chat-confirm-actions">
+                    <button class="ghost-button" onclick="confirmChatDecision('accept')">确认</button>
+                    <button class="ghost-button" onclick="confirmChatDecision('reject')">取消</button>
+                </div>
             </div>
 
             <details id="agentTrace" class="agent-trace hidden">

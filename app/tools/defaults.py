@@ -5,6 +5,7 @@
 
 from app.tools.event_tools import (
     CreateEventTool,
+    CreateEventsTool,
     DeleteEventTool,
     DeleteEventsTool,
     GetEventTool,
@@ -59,6 +60,7 @@ def build_default_registry() -> ToolRegistry:
         GetEventsTool(),
         GetEventTool(),
         CreateEventTool(),
+        CreateEventsTool(),
         UpdateEventTool(),
         DeleteEventTool(),
         DeleteEventsTool(),

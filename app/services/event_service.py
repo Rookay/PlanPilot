@@ -45,6 +45,48 @@ def create_event(db: Session, data: EventCreate) -> Event:
     return event
 
 
+def create_events(db: Session, items: List[EventCreate]) -> List[Event]:
+    """原子创建一组连续行程，任一项失败时不保留半成品。"""
+
+    if not items:
+        raise HTTPException(status_code=400, detail="至少需要一个行程项")
+
+    events: List[Event] = []
+    try:
+        for data in items:
+            values = _normalize_event_times(data.model_dump())
+            _validate_location(db, values.get("location_id"))
+            _validate_location(db, values.get("origin_location_id"))
+            _validate_coordinates(
+                values.get("location_longitude"), values.get("location_latitude")
+            )
+            _validate_coordinates(
+                values.get("origin_location_longitude"),
+                values.get("origin_location_latitude"),
+                label="出发地",
+            )
+            event = Event(**values)
+            _validate_time_range(event)
+            events.append(event)
+
+        ordered = sorted(events, key=lambda item: item.start_time)
+        for previous, current in zip(ordered, ordered[1:]):
+            if current.start_time < previous.end_time:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"行程「{previous.title}」与「{current.title}」时间重叠",
+                )
+
+        db.add_all(events)
+        db.commit()
+        for event in events:
+            db.refresh(event)
+        return events
+    except Exception:
+        db.rollback()
+        raise
+
+
 def list_events(
     db: Session,
     start: Optional[datetime] = None,

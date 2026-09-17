@@ -1102,7 +1102,7 @@ body {
 
 .chat-confirm-bar {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
     margin-top: 12px;
     padding: 12px 14px;
@@ -1113,9 +1113,35 @@ body {
     color: #7a5c00;
 }
 
-.chat-confirm-bar span {
+.chat-confirm-content {
     flex: 1;
+    min-width: 0;
     word-break: break-word;
+}
+
+.chat-confirm-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 8px;
+}
+
+.chat-confirm-preview {
+    display: grid;
+    gap: 5px;
+    margin-top: 9px;
+}
+
+.chat-confirm-item {
+    display: grid;
+    grid-template-columns: 92px minmax(120px, 0.8fr) minmax(160px, 1fr);
+    gap: 10px;
+    align-items: baseline;
+    padding-top: 5px;
+    border-top: 1px solid rgba(138, 90, 9, 0.16);
+}
+
+.chat-confirm-item small {
+    color: #735f2e;
 }
 
 
@@ -2324,5 +2350,22 @@ body {
 
     .calendar-detail-actions {
         padding: 16px 20px 20px;
+    }
+
+    .chat-confirm-bar,
+    .chat-confirm-actions {
+        width: 100%;
+    }
+
+    .chat-confirm-bar {
+        flex-direction: column;
+    }
+
+    .chat-confirm-item {
+        grid-template-columns: 82px 1fr;
+    }
+
+    .chat-confirm-item small {
+        grid-column: 1 / -1;
     }
 }

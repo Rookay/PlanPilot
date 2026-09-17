@@ -62,6 +62,25 @@ class ServiceTests(TestCase):
         self.assertEqual(accepted["accepted"], 1)
         self.assertEqual(self.db.query(Schedule).one().status, "accepted")
 
+    def test_batch_events_are_atomic_when_times_overlap(self):
+        items = [
+            EventCreate(
+                title="第一段",
+                start_time=datetime(2026, 9, 27, 2),
+                end_time=datetime(2026, 9, 27, 3),
+            ),
+            EventCreate(
+                title="重叠段",
+                start_time=datetime(2026, 9, 27, 2, 30),
+                end_time=datetime(2026, 9, 27, 4),
+            ),
+        ]
+
+        with self.assertRaises(HTTPException):
+            event_service.create_events(self.db, items)
+
+        self.assertEqual(event_service.list_events(self.db), [])
+
     def test_planning_reserves_amap_travel_time_between_locations(self):
         event_service.create_event(
             self.db,

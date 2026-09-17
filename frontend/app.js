@@ -2644,11 +2644,43 @@ function renderChatMessages() {
     if (state.chatPendingConfirmation) {
       $("chatConfirmSummary").textContent =
         "待确认：" + state.chatPendingConfirmation.summary;
+      renderChatConfirmationPreview(state.chatPendingConfirmation.preview);
       bar.classList.remove("hidden");
     } else {
+      if ($("chatConfirmPreview")) {
+        $("chatConfirmPreview").innerHTML = "";
+      }
       bar.classList.add("hidden");
     }
   }
+}
+
+function renderChatConfirmationPreview(preview) {
+  const container = $("chatConfirmPreview");
+  const events = preview?.events;
+  if (!container || !Array.isArray(events) || !events.length) {
+    if (container) {
+      container.innerHTML = "";
+    }
+    return;
+  }
+  container.innerHTML = events.map((event) => {
+    const start = parseDate(event.start_time);
+    const end = parseDate(event.end_time);
+    const time = start && end
+      ? `${formatDate(start)} ${formatTime(start)}–${formatTime(end)}`
+      : "";
+    const route = event.event_type === "travel" && event.origin_location
+      ? `${event.origin_location} → ${event.location || "目的地"}`
+      : event.location || "";
+    return `
+      <div class="chat-confirm-item">
+        <span>${escapeHtml(time)}</span>
+        <strong>${escapeHtml(event.title || "行程")}</strong>
+        <small>${escapeHtml(route)}</small>
+      </div>
+    `;
+  }).join("");
 }
 
 function renderMarkdown(value) {
@@ -2903,6 +2935,7 @@ async function sendChatMessage() {
       state.chatPendingConfirmation = {
         action_id: data.confirmation.action_id,
         summary: data.confirmation.summary,
+        preview: data.confirmation.preview,
       };
     }
     if ((data.applied_changes || []).length || (data.proposed_schedules || []).length) {

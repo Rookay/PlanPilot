@@ -1,5 +1,6 @@
 from datetime import datetime
 from unittest import TestCase
+from unittest.mock import patch
 
 from app.agent.confirmation import PendingActionStore
 from app.agent.agent import Agent
@@ -166,3 +167,113 @@ class AgentLoopTests(TestCase):
         )
         self.assertIn("已撤销计划版本", completed.reply)
         self.assertEqual(schedule_service.list_schedules(self.db), [])
+
+    def test_travel_request_selects_travel_skill(self):
+        skill = build_default_skills().select(
+            "9月27日去马鞍山玩，先去酒店放行李，安排第一天行程"
+        )
+
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill.name, "travel_planning")
+        self.assertIn("禁止调用 generate_plan", skill.system_hint)
+
+    def test_travel_itinerary_is_confirmed_and_created_as_one_batch(self):
+        events = [
+            {
+                "title": "抵达马鞍山东站",
+                "start_time": "2026-09-27T02:00:00Z",
+                "end_time": "2026-09-27T02:10:00Z",
+                "event_type": "activity",
+                "location": "马鞍山东站",
+                "location_city": "马鞍山",
+                "location_longitude": 118.55,
+                "location_latitude": 31.70,
+            },
+            {
+                "title": "前往酒店",
+                "start_time": "2026-09-27T02:10:00Z",
+                "end_time": "2026-09-27T02:30:00Z",
+                "event_type": "travel",
+                "origin_location": "马鞍山东站",
+                "origin_location_city": "马鞍山",
+                "origin_location_longitude": 118.55,
+                "origin_location_latitude": 31.70,
+                "location": "精沐精选酒店",
+                "location_city": "马鞍山",
+                "location_longitude": 118.51,
+                "location_latitude": 31.68,
+            },
+            {
+                "title": "酒店寄存行李",
+                "start_time": "2026-09-27T02:30:00Z",
+                "end_time": "2026-09-27T03:00:00Z",
+                "event_type": "activity",
+                "location": "精沐精选酒店",
+                "location_city": "马鞍山",
+                "location_longitude": 118.51,
+                "location_latitude": 31.68,
+            },
+        ]
+        agent = Agent(
+            llm=MockProvider(
+                script=[
+                    {
+                        "tool_calls": [
+                            {"name": "create_events", "arguments": {"events": events}}
+                        ]
+                    }
+                ]
+            ),
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=PendingActionStore(),
+            skill_registry=build_default_skills(),
+        )
+
+        pending = agent.handle(self.db, "安排马鞍山第一天行程", "trip-session")
+
+        self.assertTrue(pending.confirmation.required)
+        self.assertEqual(len(pending.confirmation.preview["events"]), 3)
+        self.assertEqual(event_service.list_events(self.db), [])
+        with patch(
+            "app.agent.agent.schedule_service.audit_current_plan",
+            return_value={"valid": True, "issues": [], "warnings": []},
+        ):
+            completed = agent.handle(
+                self.db,
+                "",
+                "trip-session",
+                confirm_action_id=pending.confirmation.action_id,
+                decision="accept",
+            )
+
+        self.assertIn("已创建 3 段行程", completed.reply)
+        created = event_service.list_events(self.db)
+        self.assertEqual([item.event_type for item in created], ["activity", "travel", "activity"])
+
+    def test_travel_itinerary_preview_rejects_existing_conflict(self):
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="已有安排",
+                start_time=datetime(2026, 9, 27, 3),
+                end_time=datetime(2026, 9, 27, 4),
+            ),
+        )
+        preview = build_default_registry().preview(
+            "create_events",
+            {
+                "events": [
+                    {
+                        "title": "计划游览",
+                        "start_time": "2026-09-27T03:30:00Z",
+                        "end_time": "2026-09-27T05:00:00Z",
+                        "event_type": "activity",
+                    }
+                ]
+            },
+            self.db,
+        )
+
+        self.assertFalse(preview.success)
+        self.assertIn("已有安排", preview.error)
