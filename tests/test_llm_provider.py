@@ -16,7 +16,14 @@ class _Response:
 
     def read(self):
         return json.dumps(
-            {"choices": [{"message": {"content": "OK"}}]}
+            {
+                "choices": [{"message": {"content": "OK"}}],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 3,
+                    "total_tokens": 15,
+                },
+            }
         ).encode("utf-8")
 
 
@@ -37,5 +44,6 @@ class OpenAICompatibleProviderTests(TestCase):
             response = provider.chat([{"role": "user", "content": "hello"}])
 
         self.assertEqual(response.text, "OK")
+        self.assertEqual(response.usage["total_tokens"], 15)
         build_opener.assert_called_once()
         opener.open.assert_called_once()

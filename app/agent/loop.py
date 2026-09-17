@@ -37,6 +37,10 @@ class AgentResult:
     proposed_schedules: List[dict] = field(default_factory=list)
     confirmation: ConfirmationInfo = field(default_factory=ConfirmationInfo)
     workflow_steps: List[dict] = field(default_factory=list)
+    run_id: Optional[str] = None
+    duration_ms: int = 0
+    run_status: str = "completed"
+    model_usage: dict = field(default_factory=dict)
 
 
 class AgentLoop:
@@ -60,6 +64,7 @@ class AgentLoop:
         self.fallback_provider = MockProvider()
         self.fallback_until = 0.0
         self.last_provider_error: Optional[str] = None
+        self.last_run_provider: Optional[str] = None
 
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
         self.memory.add(session_id, "user", message)
@@ -71,6 +76,7 @@ class AgentLoop:
         proposed_schedules: List[dict] = []
         tool_call_count = 0
         seen_calls: set[str] = set()
+        model_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         for _ in range(self.MAX_ITERATIONS):
             try:
@@ -79,11 +85,13 @@ class AgentLoop:
                     if time.monotonic() < self.fallback_until
                     else self.llm
                 )
+                self.last_run_provider = provider.__class__.__name__
                 response = provider.chat(messages, tools=self.registry.schemas())
                 if provider is self.llm:
                     self.mark_provider_available()
             except Exception as exc:  # noqa: BLE001
                 self.mark_provider_unavailable(exc)
+                self.last_run_provider = self.fallback_provider.__class__.__name__
                 messages.append(
                     {
                         "role": "system",
@@ -97,6 +105,8 @@ class AgentLoop:
                     messages, tools=self.registry.schemas()
                 )
 
+            self._merge_usage(model_usage, response.usage)
+
             if response.is_text() or not response.tool_calls:
                 reply = response.text or "（模型未返回内容）"
                 self.memory.add_message(
@@ -109,6 +119,7 @@ class AgentLoop:
                     tool_calls=tool_call_log,
                     applied_changes=applied_changes,
                     proposed_schedules=proposed_schedules,
+                    model_usage=model_usage,
                 )
 
             # 先记录本轮 assistant 消息（原样回传 reasoning_content 等字段）。
@@ -124,6 +135,15 @@ class AgentLoop:
 
                 if tool is None:
                     messages.append(self._tool_message(call.id, call.name, False, f"unknown tool: {call.name}"))
+                    tool_call_log.append(
+                        {
+                            "stage": "执行",
+                            "name": call.name,
+                            "success": False,
+                            "summary": f"未知工具：{call.name}",
+                            "duration_ms": 0,
+                        }
+                    )
                     continue
 
                 if call_key in seen_calls:
@@ -135,12 +155,17 @@ class AgentLoop:
                         tool_calls=tool_call_log,
                         applied_changes=applied_changes,
                         proposed_schedules=proposed_schedules,
+                        model_usage=model_usage,
                     )
                 seen_calls.add(call_key)
 
                 # confirm 级别：收集同一轮的全部变更，稍后合并成一次确认。
                 if tool.confirmation == "confirm":
+                    preview_started = time.perf_counter()
                     preview = self.registry.preview(call.name, call.arguments, db)
+                    preview_duration = int(
+                        (time.perf_counter() - preview_started) * 1000
+                    )
                     if not preview.success:
                         messages.append(
                             self._tool_message(
@@ -156,6 +181,7 @@ class AgentLoop:
                                 "arguments": call.arguments,
                                 "success": False,
                                 "summary": preview.error,
+                                "duration_ms": preview_duration,
                             }
                         )
                         continue
@@ -167,10 +193,25 @@ class AgentLoop:
                     )
                     if preview.data is not None:
                         pending_previews.append(preview.data)
+                    tool_call_log.append(
+                        {
+                            "stage": self._tool_stage(call.name),
+                            "name": call.name,
+                            "arguments": call.arguments,
+                            "success": True,
+                            "summary": preview.summary,
+                            "duration_ms": preview_duration,
+                            "awaiting_confirmation": True,
+                        }
+                    )
                     continue
 
                 # 执行并观察结果。
+                execute_started = time.perf_counter()
                 result = self.registry.execute(call.name, call.arguments, db)
+                execute_duration = int(
+                    (time.perf_counter() - execute_started) * 1000
+                )
                 tool_call_count += 1
 
                 tool_call_log.append(
@@ -180,6 +221,7 @@ class AgentLoop:
                         "arguments": call.arguments,
                         "success": result.success,
                         "summary": result.summary,
+                        "duration_ms": execute_duration,
                     }
                 )
 
@@ -242,6 +284,7 @@ class AgentLoop:
                         ],
                         preview=combined_preview,
                     ),
+                    model_usage=model_usage,
                 )
 
             if tool_call_count >= self.MAX_TOOL_CALLS:
@@ -253,6 +296,7 @@ class AgentLoop:
                     tool_calls=tool_call_log,
                     applied_changes=applied_changes,
                     proposed_schedules=proposed_schedules,
+                    model_usage=model_usage,
                 )
 
         reply = self._progress_reply(tool_call_log, proposed_schedules)
@@ -263,6 +307,7 @@ class AgentLoop:
             tool_calls=tool_call_log,
             applied_changes=applied_changes,
             proposed_schedules=proposed_schedules,
+            model_usage=model_usage,
         )
 
     def replace_provider(self, provider: LLMProvider) -> None:
@@ -332,9 +377,47 @@ class AgentLoop:
             return "读取"
         if name in {"evaluate_plan", "check_conflicts", "estimate_travel_time"}:
             return "验证"
-        if name in {"generate_plan", "replan", "replan_local", "create_events"}:
+        if name in {
+            "generate_plan",
+            "replan",
+            "replan_local",
+            "create_events",
+            "revise_trip",
+        }:
             return "规划"
         return "执行"
+
+    @staticmethod
+    def tool_label(name: str) -> str:
+        labels = {
+            "get_tasks": "读取任务",
+            "get_events": "读取固定行程",
+            "get_trips": "定位行程组",
+            "search_places": "搜索地点",
+            "geocode_address": "解析地点",
+            "estimate_travel_time": "验证路线时间",
+            "create_events": "生成完整行程",
+            "revise_trip": "整体调整行程",
+            "generate_plan": "生成任务安排",
+            "replan": "重新规划",
+            "replan_local": "局部重新规划",
+            "check_conflicts": "检查冲突",
+            "evaluate_plan": "评估方案",
+            "update_task": "更新任务",
+            "update_event": "更新事件",
+            "delete_events": "批量删除事件",
+            "postflight_audit": "执行后复查",
+        }
+        return labels.get(name, name.replace("_", " "))
+
+    @staticmethod
+    def _merge_usage(total: dict, usage: dict | None) -> None:
+        usage = usage or {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            try:
+                total[key] += max(0, int(usage.get(key) or 0))
+            except (TypeError, ValueError):
+                continue
 
     @staticmethod
     def _progress_reply(tool_call_log: List[dict], proposed_schedules: List[dict]) -> str:

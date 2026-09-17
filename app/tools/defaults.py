@@ -10,6 +10,8 @@ from app.tools.event_tools import (
     DeleteEventsTool,
     GetEventTool,
     GetEventsTool,
+    GetTripsTool,
+    ReviseTripTool,
     UpdateEventTool,
 )
 from app.tools.external_tools import GetCurrentTimeTool, GetWeatherTool
@@ -59,8 +61,10 @@ def build_default_registry() -> ToolRegistry:
         # Event
         GetEventsTool(),
         GetEventTool(),
+        GetTripsTool(),
         CreateEventTool(),
         CreateEventsTool(),
+        ReviseTripTool(),
         UpdateEventTool(),
         DeleteEventTool(),
         DeleteEventsTool(),

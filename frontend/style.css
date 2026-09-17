@@ -1830,10 +1830,32 @@ body {
     font-size: 13px;
 }
 
-.agent-trace summary {
-    padding: 12px 0;
-    cursor: pointer;
-    font-weight: 700;
+.trace-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 0 8px;
+}
+
+.trace-header strong {
+    color: var(--text, #222);
+}
+
+.trace-header select {
+    width: min(220px, 48vw);
+    padding: 7px 28px 7px 9px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #fff;
+}
+
+.trace-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    padding-bottom: 8px;
+    font-size: 12px;
 }
 
 .trace-row {
@@ -1855,6 +1877,154 @@ body {
 
 .trace-state.failed {
     color: #b04432;
+}
+
+.trace-state.warning,
+.trace-state.waiting {
+    color: #9a650e;
+}
+
+.evaluation-score-band {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 28px;
+    align-items: stretch;
+    padding: 22px 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+}
+
+.evaluation-score-band > div:first-child {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.evaluation-score-band span {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.evaluation-score-band > div:first-child strong {
+    margin-top: 4px;
+    font-size: 38px;
+    line-height: 1;
+}
+
+.evaluation-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 1px;
+    background: var(--line);
+}
+
+.evaluation-metrics > div {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+    min-width: 0;
+    padding: 12px 14px;
+    background: #fff;
+}
+
+.evaluation-metrics strong {
+    font-size: 16px;
+}
+
+.evaluation-table-wrap {
+    overflow-x: auto;
+    margin-top: 22px;
+}
+
+.evaluation-table {
+    width: 100%;
+    min-width: 720px;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.evaluation-table th,
+.evaluation-table td {
+    padding: 12px 10px;
+    border-bottom: 1px solid var(--line);
+    text-align: left;
+    vertical-align: middle;
+}
+
+.evaluation-table th {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.evaluation-table td:first-child {
+    min-width: 210px;
+}
+
+.evaluation-table td small {
+    display: block;
+    max-width: 360px;
+    margin-top: 4px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+}
+
+.evaluation-result,
+.evaluation-check {
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.evaluation-result.pass,
+.evaluation-check.pass {
+    color: #13715f;
+}
+
+.evaluation-result.fail,
+.evaluation-check.fail {
+    color: #b04432;
+}
+
+.itinerary-group-label {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 12px 0 4px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.itinerary-group-label span,
+.chat-confirm-trip-title span {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.chat-confirm-trip-title {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0 8px;
+}
+
+.chat-confirm-delete {
+    padding: 8px 0 2px;
+    color: #b04432;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+@media (max-width: 800px) {
+    .evaluation-score-band {
+        grid-template-columns: 1fr;
+    }
+
+    .evaluation-metrics {
+        grid-template-columns: repeat(2, minmax(120px, 1fr));
+    }
 }
 
 .settings-layout {

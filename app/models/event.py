@@ -34,6 +34,9 @@ class Event(Base):
         default="activity",
     )
     travel_mode = Column(String(20), nullable=True)
+    trip_id = Column(String(32), nullable=True, index=True)
+    trip_title = Column(String(200), nullable=True)
+    trip_order = Column(Integer, nullable=True)
 
     location = Column(
         String(200),

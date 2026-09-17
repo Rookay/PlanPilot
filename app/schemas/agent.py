@@ -42,3 +42,8 @@ class AgentChatResponse(BaseModel):
     proposed_schedules: List[dict] = Field(default_factory=list)
     confirmation: ConfirmationInfoSchema = Field(default_factory=ConfirmationInfoSchema)
     workflow_steps: List[dict] = Field(default_factory=list)
+    run_id: Optional[str] = None
+    duration_ms: int = 0
+    run_status: str = "completed"
+    model_usage: dict = Field(default_factory=dict)
+    estimated_cost: float = 0

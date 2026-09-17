@@ -3,6 +3,7 @@
 # File    ：event_service.py
 """事件业务逻辑，由 API 路由和 Agent Tool 共用。"""
 
+import uuid
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -10,7 +11,13 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models.event import Event
-from app.schemas.event import EventCreate, EventSeriesCreate, EventUpdate
+from app.schemas.event import (
+    EventCreate,
+    EventSeriesCreate,
+    EventUpdate,
+    TripRevision,
+    TripSummary,
+)
 from app.services import location_service
 from app.utils import to_naive_utc
 
@@ -45,15 +52,28 @@ def create_event(db: Session, data: EventCreate) -> Event:
     return event
 
 
-def create_events(db: Session, items: List[EventCreate]) -> List[Event]:
+def create_events(
+    db: Session,
+    items: List[EventCreate],
+    trip_title: str | None = None,
+    trip_id: str | None = None,
+) -> List[Event]:
     """原子创建一组连续行程，任一项失败时不保留半成品。"""
 
     if not items:
         raise HTTPException(status_code=400, detail="至少需要一个行程项")
 
     events: List[Event] = []
+    group_id = trip_id or uuid.uuid4().hex
+    ordered_items = sorted(items, key=lambda item: to_naive_utc(item.start_time))
+    inferred_city = next((item.location_city for item in ordered_items if item.location_city), None)
+    group_title = trip_title or (
+        f"{inferred_city}行程"
+        if inferred_city
+        else f"{to_naive_utc(ordered_items[0].start_time):%m月%d日}行程"
+    )
     try:
-        for data in items:
+        for order, data in enumerate(ordered_items, start=1):
             values = _normalize_event_times(data.model_dump())
             _validate_location(db, values.get("location_id"))
             _validate_location(db, values.get("origin_location_id"))
@@ -65,7 +85,12 @@ def create_events(db: Session, items: List[EventCreate]) -> List[Event]:
                 values.get("origin_location_latitude"),
                 label="出发地",
             )
-            event = Event(**values)
+            event = Event(
+                **values,
+                trip_id=group_id,
+                trip_title=group_title,
+                trip_order=order,
+            )
             _validate_time_range(event)
             events.append(event)
 
@@ -98,6 +123,153 @@ def list_events(
     if end is not None:
         query = query.filter(Event.start_time < to_naive_utc(end))
     return query.order_by(Event.start_time).all()
+
+
+def list_trips(db: Session) -> List[TripSummary]:
+    grouped: dict[str, list[Event]] = {}
+    for event in (
+        db.query(Event)
+        .filter(Event.trip_id.isnot(None))
+        .order_by(Event.start_time, Event.id)
+        .all()
+    ):
+        grouped.setdefault(event.trip_id, []).append(event)
+    return [
+        TripSummary(
+            trip_id=trip_id,
+            title=events[0].trip_title or "未命名行程",
+            start_time=min(item.start_time for item in events),
+            end_time=max(item.end_time for item in events),
+            event_count=len(events),
+            cities=list(
+                dict.fromkeys(
+                    item.location_city for item in events if item.location_city
+                )
+            ),
+        )
+        for trip_id, events in grouped.items()
+    ]
+
+
+def get_trip_events(db: Session, trip_id: str) -> List[Event]:
+    events = (
+        db.query(Event)
+        .filter(Event.trip_id == trip_id)
+        .order_by(Event.trip_order, Event.start_time, Event.id)
+        .all()
+    )
+    if not events:
+        raise HTTPException(status_code=404, detail="行程组不存在")
+    return events
+
+
+def preview_trip_revision(db: Session, revision: TripRevision) -> dict:
+    events = get_trip_events(db, revision.trip_id)
+    by_id = {event.id: event for event in events}
+    touched_ids = {item.event_id for item in revision.updates}
+    delete_ids = set(revision.delete_event_ids)
+    unknown = sorted((touched_ids | delete_ids) - set(by_id))
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"以下事件不属于该行程组：{', '.join(map(str, unknown))}",
+        )
+    if touched_ids & delete_ids:
+        raise HTTPException(status_code=400, detail="同一事件不能同时修改和删除")
+
+    update_by_id = {item.event_id: item for item in revision.updates}
+    after: list[tuple[int, EventCreate]] = []
+    for event in events:
+        if event.id in delete_ids:
+            continue
+        values = {
+            name: getattr(event, name)
+            for name in EventCreate.model_fields
+        }
+        if revision.shift_minutes:
+            delta = timedelta(minutes=revision.shift_minutes)
+            values["start_time"] = event.start_time + delta
+            values["end_time"] = event.end_time + delta
+        update = update_by_id.get(event.id)
+        if update is not None:
+            changes = update.model_dump(exclude={"event_id"}, exclude_unset=True)
+            if (
+                "location" in changes
+                and changes["location"] != event.location
+                and "location_longitude" not in changes
+                and "location_latitude" not in changes
+                and not changes.get("location_id")
+            ):
+                changes.update(
+                    location_city=None,
+                    location_longitude=None,
+                    location_latitude=None,
+                )
+            if (
+                "origin_location" in changes
+                and changes["origin_location"] != event.origin_location
+                and "origin_location_longitude" not in changes
+                and "origin_location_latitude" not in changes
+                and not changes.get("origin_location_id")
+            ):
+                changes.update(
+                    origin_location_city=None,
+                    origin_location_longitude=None,
+                    origin_location_latitude=None,
+                )
+            values.update(changes)
+        values = _normalize_event_times(values)
+        after.append((event.id, EventCreate(**values)))
+
+    if not after:
+        raise HTTPException(status_code=400, detail="行程组至少需要保留一个事件")
+    after.sort(key=lambda item: item[1].start_time)
+    for (_, previous), (_, current) in zip(after, after[1:]):
+        if current.start_time < previous.end_time:
+            raise HTTPException(
+                status_code=400,
+                detail=f"行程「{previous.title}」与「{current.title}」时间重叠",
+            )
+    return {
+        "trip_id": revision.trip_id,
+        "trip_title": revision.trip_title or events[0].trip_title or "未命名行程",
+        "before": events,
+        "after": after,
+        "deleted_ids": sorted(delete_ids),
+        "shift_minutes": revision.shift_minutes,
+    }
+
+
+def apply_trip_revision(db: Session, revision: TripRevision) -> List[Event]:
+    preview = preview_trip_revision(db, revision)
+    by_id = {event.id: event for event in preview["before"]}
+    try:
+        for event_id in preview["deleted_ids"]:
+            db.delete(by_id[event_id])
+        for order, (event_id, payload) in enumerate(preview["after"], start=1):
+            event = by_id[event_id]
+            values = _normalize_event_times(payload.model_dump())
+            _validate_location(db, values.get("location_id"))
+            _validate_location(db, values.get("origin_location_id"))
+            for key, value in values.items():
+                setattr(event, key, value)
+            event.trip_title = preview["trip_title"]
+            event.trip_order = order
+            _validate_time_range(event)
+            _validate_coordinates(event.location_longitude, event.location_latitude)
+            _validate_coordinates(
+                event.origin_location_longitude,
+                event.origin_location_latitude,
+                label="出发地",
+            )
+        db.commit()
+        result = get_trip_events(db, revision.trip_id)
+        for event in result:
+            db.refresh(event)
+        return result
+    except Exception:
+        db.rollback()
+        raise
 
 
 def create_event_series(db: Session, data: EventSeriesCreate) -> List[Event]:
@@ -191,6 +363,9 @@ def update_event(db: Session, event_id: int, data: EventUpdate) -> Event:
 
     _validate_time_range(event)
 
+    if event.trip_id:
+        db.flush()
+        _reindex_trip(db, event.trip_id)
     db.commit()
     db.refresh(event)
     return event
@@ -198,8 +373,12 @@ def update_event(db: Session, event_id: int, data: EventUpdate) -> Event:
 
 def delete_event(db: Session, event_id: int) -> dict:
     event = get_event(db, event_id)
+    trip_id = event.trip_id
 
     db.delete(event)
+    db.flush()
+    if trip_id:
+        _reindex_trip(db, trip_id)
     db.commit()
 
     return {"message": "Event deleted", "id": event_id}
@@ -222,7 +401,11 @@ def delete_events(db: Session, event_ids: List[int]) -> dict:
         )
 
     titles = [by_id[event_id].title for event_id in unique_ids]
+    trip_ids = {event.trip_id for event in events if event.trip_id}
     db.query(Event).filter(Event.id.in_(unique_ids)).delete(synchronize_session=False)
+    db.flush()
+    for trip_id in trip_ids:
+        _reindex_trip(db, trip_id)
     db.commit()
     return {
         "message": "Events deleted",
@@ -244,3 +427,14 @@ def _validate_coordinates(
 ) -> None:
     if (longitude is None) != (latitude is None):
         raise HTTPException(status_code=400, detail=f"{label}经度和纬度必须同时提供")
+
+
+def _reindex_trip(db: Session, trip_id: str) -> None:
+    events = (
+        db.query(Event)
+        .filter(Event.trip_id == trip_id)
+        .order_by(Event.start_time, Event.end_time, Event.id)
+        .all()
+    )
+    for order, event in enumerate(events, start=1):
+        event.trip_order = order

@@ -34,6 +34,7 @@ _SYSTEM_PROMPT = """你是 PlanPilot 的个人规划助手，帮助用户管理�
 14. 用户要求长任务分段时，通过 update_task 设置 splittable=true，并合理设置 min_chunk_minutes、max_chunk_minutes；用户说明先后关系时写入 dependency_ids，不得仅记录在描述中。
 15. 已锁定日程不可移动。用户要求调整某一天或某一周时，优先使用 replan_local，先预览并统一确认；用户要求撤销最近的日程修改时使用 undo_latest_plan。
 16. 旅行行程请求不得调用 generate_plan，因为它只会安排数据库里的待办任务。应先用 get_events 查询目标日期已有安排，再搜索车站、酒店和 2 到 4 个适合当天的景点或餐饮区域，逐段估算路线；将到站、赶路、寄存/入住、游览、用餐等组成连续时间线，最后只调用一次 create_events 供用户统一确认。地点搜索或路线失败时应明确缺失项，不得用无关待办日程冒充旅行方案。
+17. 用户要求调整刚才或已有的旅行行程时，先调用 get_trips 定位行程组，再调用 get_events 获取事件 id，最后只调用一次 revise_trip 完成整组平移、批量修改或删除。不得逐条 update_event，也不得留下半段赶路；修改后的完整时间线必须重新通过地图校验并统一确认。
 
 时区规则（非常重要）：
 - 系统内部统一使用 UTC 存储时间，传给工具的时间必须是 UTC（ISO 8601，带 Z 后缀）。
@@ -139,7 +140,8 @@ def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int
             )
             lines.append(
                 f"- #{event.id} {event.title} | {event.start_time} ~ {event.end_time} | "
-                f"类型 {event_type} | {location_summary}"
+                f"类型 {event_type} | {location_summary} | "
+                f"行程组 {event.trip_id or '无'}({event.trip_title or '无'})"
             )
     else:
         lines.append("- （无）")

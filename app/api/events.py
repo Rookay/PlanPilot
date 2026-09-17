@@ -14,6 +14,7 @@ from app.schemas.event import (
     EventSeriesCreate,
     EventSeriesResponse,
     EventUpdate,
+    TripSummary,
 )
 from app.services import event_service
 
@@ -47,6 +48,16 @@ def create_event_series(
 ):
     events = event_service.create_event_series(db, event_data)
     return EventSeriesResponse(events=events, created=len(events))
+
+
+@router.get("/trips", response_model=List[TripSummary])
+def get_trips(db: Session = Depends(get_db)):
+    return event_service.list_trips(db)
+
+
+@router.get("/trips/{trip_id}", response_model=List[EventResponse])
+def get_trip(trip_id: str, db: Session = Depends(get_db)):
+    return event_service.get_trip_events(db, trip_id)
 
 
 @router.get("/{event_id}", response_model=EventResponse)

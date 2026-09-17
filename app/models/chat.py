@@ -30,6 +30,7 @@ class ChatMessage(Base):
     )
 
     content = Column(Text, nullable=False)
+    agent_run_id = Column(String(32), nullable=True, index=True)
 
     created_at = Column(
         DateTime,

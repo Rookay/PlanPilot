@@ -29,6 +29,7 @@
             <button data-page="itinerary" onclick="showPage('itinerary')">行程地图</button>
             <button data-page="planning" onclick="showPage('planning')">任务安排</button>
             <button data-page="chat" onclick="showPage('chat')">对话助手</button>
+            <button data-page="evaluations" onclick="showPage('evaluations')">Agent 评测</button>
             <button data-page="settings" onclick="showPage('settings')">规划偏好</button>
         </nav>
     </aside>
@@ -248,11 +249,54 @@
                 </div>
             </div>
 
-            <details id="agentTrace" class="agent-trace hidden">
-                <summary>本次执行记录</summary>
+            <section id="agentTrace" class="agent-trace hidden">
+                <div class="trace-header">
+                    <strong>执行轨迹</strong>
+                    <select id="agentRunSelect" aria-label="选择执行记录" onchange="selectAgentRun(this.value)"></select>
+                </div>
+                <div id="agentTraceMeta" class="trace-meta"></div>
                 <div id="agentTraceContent"></div>
-            </details>
+            </section>
 
+        </section>
+
+
+        <!-- Agent 评测 -->
+        <section id="evaluations" class="page hidden">
+            <div class="page-header">
+                <div>
+                    <h2>Agent 评测</h2>
+                    <p class="muted">端到端回归场景与可靠性指标</p>
+                </div>
+                <button id="evaluationRunButton" class="primary-button" onclick="runEvaluation()">运行评测</button>
+            </div>
+
+            <div id="evaluationEmpty" class="empty">尚未运行评测</div>
+            <div id="evaluationResults" class="hidden">
+                <div class="evaluation-score-band">
+                    <div>
+                        <span>综合分</span>
+                        <strong id="evaluationScore">0</strong>
+                    </div>
+                    <div id="evaluationMetrics" class="evaluation-metrics"></div>
+                </div>
+
+                <div class="evaluation-table-wrap">
+                    <table class="evaluation-table">
+                        <thead>
+                            <tr>
+                                <th>场景</th>
+                                <th>结果</th>
+                                <th>工具选择</th>
+                                <th>约束</th>
+                                <th>确认</th>
+                                <th>耗时</th>
+                            </tr>
+                        </thead>
+                        <tbody id="evaluationScenarioRows"></tbody>
+                    </table>
+                </div>
+            </div>
         </section>
 
 

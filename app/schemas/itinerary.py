@@ -31,6 +31,9 @@ class ItineraryItem(BaseModel):
     status: str
     event_type: Literal["activity", "travel"] = "activity"
     travel_mode: Optional[EventTravelMode] = None
+    trip_id: Optional[str] = None
+    trip_title: Optional[str] = None
+    trip_order: Optional[int] = None
     origin_location: Optional[ItineraryLocation] = None
     location: Optional[ItineraryLocation] = None
 

@@ -11,6 +11,8 @@ from app.models.chat import ChatMessage
 from app.models.preference import UserPreference
 from app.models.location import SavedLocation
 from app.models.plan_version import PlanVersion
+from app.models.agent_run import AgentRun
+from app.models.evaluation import EvaluationRun
 
 __all__ = [
     "Task",
@@ -21,4 +23,6 @@ __all__ = [
     "SavedLocation",
     "TaskDependency",
     "PlanVersion",
+    "AgentRun",
+    "EvaluationRun",
 ]

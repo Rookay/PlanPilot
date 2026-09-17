@@ -30,6 +30,7 @@ class LLMResponse:
     #: 模型返回的原始 assistant 消息（含 reasoning_content 等字段）。
     #: 某些 reasoning 模型（如 DeepSeek）要求后续调用原样回传，否则报 400。
     raw_message: Optional[dict] = None
+    usage: dict = field(default_factory=dict)
 
     def is_text(self) -> bool:
         return self.tool_calls is None

@@ -11,7 +11,7 @@ from app.integrations.maps.base import MapIntegrationError
 from app.integrations.maps.service import get_map_service
 from app.models.event import Event
 from app.models.schedule import Schedule
-from app.schemas.event import EventCreate, EventSeriesCreate, EventUpdate
+from app.schemas.event import EventCreate, EventSeriesCreate, EventUpdate, TripRevision
 from app.services import event_service
 from app.services.travel_planning_service import (
     LocatedBlock,
@@ -69,6 +69,27 @@ class GetEventTool(Tool):
         except Exception as exc:  # noqa: BLE001
             return ToolResult(success=False, error=str(exc))
         return ToolResult(success=True, data=event_to_dict(event))
+
+
+class GetTripsTool(Tool):
+    name = "get_trips"
+    description = "查询由多段事件组成的旅行行程组，用于后续整体顺延或局部调整。"
+    input_schema = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "array", "items": {"type": "object"}}
+    confirmation = "none"
+
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
+        trips = event_service.list_trips(db)
+        return ToolResult(
+            success=True,
+            data=[item.model_dump(mode="json") for item in trips],
+            summary=f"共 {len(trips)} 个行程组",
+        )
 
 
 class CreateEventTool(Tool):
@@ -191,6 +212,7 @@ class CreateEventsTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
+            "trip_title": {"type": "string", "description": "整组行程名称"},
             "events": {
                 "type": "array",
                 "minItems": 1,
@@ -230,7 +252,11 @@ class CreateEventsTool(Tool):
             route_issues = self._route_issues(payloads)
             if route_issues:
                 return ToolResult(success=False, error="；".join(route_issues))
-            events = event_service.create_events(db, payloads)
+            events = event_service.create_events(
+                db,
+                payloads,
+                trip_title=kwargs.get("trip_title"),
+            )
         except Exception as exc:  # noqa: BLE001
             return ToolResult(success=False, error=str(exc))
         return ToolResult(
@@ -273,24 +299,33 @@ class CreateEventsTool(Tool):
                 }
             )
         titles = "、".join(item.title for item in payloads)
+        trip_title = kwargs.get("trip_title") or "一日行程"
         return ToolResult(
             success=True,
             needs_confirmation=True,
             data={"events": preview},
-            summary=f"将添加 {len(payloads)} 段行程：{titles}",
+            summary=f"将创建行程组「{trip_title}」，包含 {len(payloads)} 段：{titles}",
         )
 
     @staticmethod
-    def _existing_conflict(db: Session, payloads: list[EventCreate]) -> str | None:
+    def _existing_conflict(
+        db: Session,
+        payloads: list[EventCreate],
+        exclude_event_ids: set[int] | None = None,
+    ) -> str | None:
         if not payloads:
             return None
         range_start = min(item.start_time for item in payloads)
         range_end = max(item.end_time for item in payloads)
+        event_query = db.query(Event).filter(
+            Event.start_time < range_end,
+            Event.end_time > range_start,
+        )
+        if exclude_event_ids:
+            event_query = event_query.filter(Event.id.notin_(exclude_event_ids))
         existing = [
             (item.title, item.start_time, item.end_time)
-            for item in db.query(Event)
-            .filter(Event.start_time < range_end, Event.end_time > range_start)
-            .all()
+            for item in event_query.all()
         ]
         existing.extend(
             (f"任务安排 #{item.id}", item.start_time, item.end_time)
@@ -338,6 +373,139 @@ class CreateEventsTool(Tool):
             return []
         checker = TravelConstraintChecker(map_service, blocks, {})
         return checker.sequence_issues([])
+
+
+class ReviseTripTool(Tool):
+    name = "revise_trip"
+    description = (
+        "原子调整一个旅行行程组。可整体顺延/提前、批量修改事件、删除景点或赶路段、"
+        "更换交通方式和重命名；执行前统一展示完整新时间线并确认。"
+    )
+    _update_properties = {
+        "event_id": {"type": "integer"},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "start_time": {"type": "string"},
+        "end_time": {"type": "string"},
+        "event_type": {"type": "string", "enum": ["activity", "travel"]},
+        "travel_mode": {
+            "type": "string",
+            "enum": ["walking", "driving", "taxi", "transit"],
+        },
+        "location": {"type": "string"},
+        "location_id": {"type": "integer"},
+        "location_city": {"type": "string"},
+        "location_longitude": {"type": "number"},
+        "location_latitude": {"type": "number"},
+        "origin_location": {"type": "string"},
+        "origin_location_id": {"type": "integer"},
+        "origin_location_city": {"type": "string"},
+        "origin_location_longitude": {"type": "number"},
+        "origin_location_latitude": {"type": "number"},
+    }
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "trip_id": {"type": "string"},
+            "trip_title": {"type": "string"},
+            "shift_minutes": {
+                "type": "integer",
+                "minimum": -1440,
+                "maximum": 1440,
+                "description": "整组平移分钟数，正数顺延、负数提前",
+            },
+            "updates": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {
+                    "type": "object",
+                    "properties": _update_properties,
+                    "required": ["event_id"],
+                    "additionalProperties": False,
+                },
+            },
+            "delete_event_ids": {
+                "type": "array",
+                "maxItems": 30,
+                "items": {"type": "integer"},
+            },
+        },
+        "required": ["trip_id"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
+    confirmation = "confirm"
+
+    @staticmethod
+    def _revision(kwargs: dict) -> TripRevision:
+        return TripRevision.model_validate(kwargs)
+
+    def _validated_preview(self, db: Session, revision: TripRevision) -> dict:
+        preview = event_service.preview_trip_revision(db, revision)
+        payloads = [payload for _, payload in preview["after"]]
+        conflict = CreateEventsTool._existing_conflict(
+            db,
+            payloads,
+            exclude_event_ids={event.id for event in preview["before"]},
+        )
+        if conflict:
+            raise ValueError(conflict)
+        route_issues = CreateEventsTool._route_issues(payloads)
+        if route_issues:
+            raise ValueError("；".join(route_issues))
+        return preview
+
+    def preview(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            revision = self._revision(kwargs)
+            result = self._validated_preview(db, revision)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        before_by_id = {event.id: event for event in result["before"]}
+        events = []
+        for order, (event_id, payload) in enumerate(result["after"], start=1):
+            before = before_by_id[event_id]
+            events.append(
+                {
+                    **payload.model_dump(mode="json"),
+                    "id": event_id,
+                    "trip_id": revision.trip_id,
+                    "trip_order": order,
+                    "change": "updated"
+                    if payload.model_dump() != {
+                        name: getattr(before, name) for name in EventCreate.model_fields
+                    }
+                    else "unchanged",
+                }
+            )
+        return ToolResult(
+            success=True,
+            needs_confirmation=True,
+            data={
+                "trip_id": revision.trip_id,
+                "trip_title": result["trip_title"],
+                "events": events,
+                "deleted_event_ids": result["deleted_ids"],
+                "shift_minutes": result["shift_minutes"],
+            },
+            summary=(
+                f"将整体调整行程组「{result['trip_title']}」："
+                f"保留 {len(events)} 段，删除 {len(result['deleted_ids'])} 段"
+            ),
+        )
+
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            revision = self._revision(kwargs)
+            self._validated_preview(db, revision)
+            events = event_service.apply_trip_revision(db, revision)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        return ToolResult(
+            success=True,
+            data={"events": [event_to_dict(event) for event in events]},
+            summary=f"已更新行程组「{events[0].trip_title}」，现有 {len(events)} 段",
+        )
 
 
 class UpdateEventTool(Tool):

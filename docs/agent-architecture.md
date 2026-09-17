@@ -10,7 +10,7 @@
 
 - ✅ Planning Engine 抽取到 `app/planning/engine.py`（generate / find_free_slots / check_conflicts / evaluate_plan）
 - ✅ 业务逻辑抽取到 `app/services/`（task / event / schedule）
-- ✅ Tool 骨架 + 31 个工具（`app/tools/`）
+- ✅ Tool 骨架 + 33 个工具（`app/tools/`）
 - ✅ Skill 系统（`app/skills/`，第一版为提示词档案）
 - ✅ Agent Loop / Context / Memory / Confirmation（`app/agent/`）
 - ✅ LLM Provider 抽象 + MockProvider + OpenAICompatibleProvider（`app/llm/`）
@@ -28,6 +28,9 @@
 - ✅ 日历拖动/缩放前的冲突与相邻地点通勤校验
 - ✅ 模型连接故障自动降级、代理失败直连重试与用户主动重连
 - ✅ 旅行意图独立路由、逐段地图验证、批量行程预览与原子写入
+- ✅ 行程组整体顺延、批量删改、交通方式切换与原子确认
+- ✅ Agent Run 持久化轨迹、阶段状态与工具耗时
+- ✅ 隔离数据库的端到端 Agent 评测场景、聚合指标与前端评测页
 
 接入真实大模型见 [docs/llm-integration.md](./llm-integration.md)。
 
@@ -45,7 +48,7 @@
   -> Tool Registry 依次执行
   -> 任一步失败：恢复快照
   -> 全部成功：运行时间冲突与通勤约束审计
-  -> 返回自然语言结果、变更集和结构化执行轨迹
+  -> 持久化 Agent Run，并返回自然语言结果、变更集和结构化执行轨迹
 ```
 
 ### 规划修改的安全边界

@@ -61,7 +61,22 @@ def llm_config() -> dict:
         "api_key": os.getenv("LLM_API_KEY") or get("llm", "api_key", ""),
         "model": os.getenv("LLM_MODEL") or get("llm", "model", "gpt-4o-mini"),
         "timeout": timeout,
+        "input_price_per_million": _non_negative_float(
+            os.getenv("LLM_INPUT_PRICE_PER_MILLION")
+            or get("llm", "input_price_per_million", 0)
+        ),
+        "output_price_per_million": _non_negative_float(
+            os.getenv("LLM_OUTPUT_PRICE_PER_MILLION")
+            or get("llm", "output_price_per_million", 0)
+        ),
     }
+
+
+def _non_negative_float(value: Any) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def external_api(name: str) -> dict:

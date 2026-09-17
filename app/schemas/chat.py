@@ -2,7 +2,7 @@
 # Project ：mine
 # File    ：chat.py
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -24,4 +24,5 @@ class ChatMessageResponse(ChatMessageBase):
 
     id: int
     session_id: str = "legacy"
+    agent_run_id: Optional[str] = None
     created_at: datetime

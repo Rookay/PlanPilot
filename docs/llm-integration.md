@@ -52,6 +52,8 @@ python run.py
 | `LLM_API_KEY` | 否 | API Key（本地 Ollama 等可留空） | `sk-xxx` |
 | `LLM_MODEL` | 否 | 模型名，默认 `gpt-4o-mini` | `deepseek-chat` |
 | `LLM_TIMEOUT` | 否 | 请求超时秒数，默认 30 | `30` |
+| `LLM_INPUT_PRICE_PER_MILLION` | 否 | 每百万输入 token 的成本，仅用于轨迹估算 | `2` |
+| `LLM_OUTPUT_PRICE_PER_MILLION` | 否 | 每百万输出 token 的成本，仅用于轨迹估算 | `8` |
 
 ## 3. 常见服务商配置
 
@@ -113,4 +115,4 @@ class LLMProvider(ABC):
 | `app/llm/openai_compat.py` | OpenAI 兼容 Provider（真实接入）+ `from_env()` |
 | `app/agent/factory.py` | 通过 `from_config()` 选择 Provider 并组装 Agent 单例 |
 | `app/agent/loop.py` | Agent Loop（决策 → 工具 → 观察 → 确认） |
-| `app/tools/defaults.py` | 全部 28 个工具的注册 |
+| `app/tools/defaults.py` | 全部 33 个工具的注册 |

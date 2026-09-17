@@ -64,9 +64,17 @@ class OpenAICompatibleProvider(LLMProvider):
                         arguments=arguments,
                     )
                 )
-            return LLMResponse(tool_calls=calls, raw_message=message)
+            return LLMResponse(
+                tool_calls=calls,
+                raw_message=message,
+                usage=data.get("usage") or {},
+            )
 
-        return LLMResponse(text=message.get("content"), raw_message=message)
+        return LLMResponse(
+            text=message.get("content"),
+            raw_message=message,
+            usage=data.get("usage") or {},
+        )
 
     def structured(self, messages: list[dict], output_schema: dict) -> dict:
         payload = {

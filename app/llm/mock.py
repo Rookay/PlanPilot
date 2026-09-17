@@ -80,6 +80,7 @@ class MockProvider(LLMProvider):
         wants_delete_events = any(word in last_user for word in ("删除", "清空")) and any(
             word in last_user for word in ("事件", "行程", "出去玩", "固定安排")
         )
+        wants_conflicts = "冲突" in last_user
         recent_assistant_context = "\n".join(
             str(item.get("content") or "")
             for item in messages[-12:]
@@ -143,6 +144,11 @@ class MockProvider(LLMProvider):
                 )
             )
 
+        if wants_conflicts and "check_conflicts" not in executed:
+            return LLMResponse(
+                tool_calls=[ToolCall(id="mock_conflict", name="check_conflicts", arguments={})]
+            )
+
         if wants_weather and "get_weather" not in executed:
             target = utcnow().date()
             if "明天" in last_user:
@@ -203,10 +209,6 @@ class MockProvider(LLMProvider):
                     continue
             return LLMResponse(text="已执行完毕：" + "；".join(summaries or ["操作完成"]))
 
-        if "冲突" in last_user:
-            return LLMResponse(
-                tool_calls=[ToolCall(id="mock_conflict", name="check_conflicts", arguments={})]
-            )
         if "空闲" in last_user:
             start = (utcnow() + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             return LLMResponse(

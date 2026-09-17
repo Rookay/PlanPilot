@@ -54,6 +54,9 @@ const state = {
   mapLoadPromise: null,
   lastPlanBatchId: null,
   chatLoaded: false,
+  agentRuns: [],
+  evaluationRun: null,
+  evaluationsLoaded: false,
 };
 
 state.chatSessionId =
@@ -257,7 +260,9 @@ function showPage(pageName) {
   } else if (pageName === "itinerary") {
     loadItinerary().catch(handleError);
   } else if (pageName === "chat") {
-    Promise.all([loadChatHistory(), loadAgentStatus()]).catch(handleError);
+    Promise.all([loadChatHistory(), loadAgentStatus(), loadAgentRuns()]).catch(handleError);
+  } else if (pageName === "evaluations") {
+    loadEvaluation().catch(handleError);
   } else if (pageName === "settings") {
     Promise.all([loadPreferences(), loadLocations()]).catch(handleError);
   }
@@ -727,6 +732,9 @@ function renderEvents() {
 
 function renderEventItem(event) {
   const meta = [eventDurationText(event)];
+  if (event.trip_id) {
+    meta.push(`行程组：${event.trip_title || "未命名行程"}`);
+  }
   const savedLocation = locationById(event.location_id);
   const savedOrigin = locationById(event.origin_location_id);
   if (event.event_type === "travel") {
@@ -985,6 +993,15 @@ function renderItineraryTimeline() {
   }
 
   itinerary.items.forEach((item, index) => {
+    const previousItem = index > 0 ? itinerary.items[index - 1] : null;
+    if (item.trip_id && item.trip_id !== previousItem?.trip_id) {
+      rows.push(`
+        <div class="itinerary-group-label">
+          <strong>${escapeHtml(item.trip_title || "未命名行程")}</strong>
+          <span>${escapeHtml(`${itinerary.items.filter((candidate) => candidate.trip_id === item.trip_id).length} 段`)}</span>
+        </div>
+      `);
+    }
     const leg = legsByDestination.get(item.id);
     if (leg) {
       const routeText = leg.duration_minutes === null
@@ -1991,6 +2008,7 @@ function buildCalendarItemDetail(kind, id) {
         ["时间", calendarTimeRange(start, end)],
         ["时长", calendarDurationText(start, end)],
         ...(isTravel ? [["交通方式", travelModeName(event.travel_mode)]] : []),
+        ...(event.trip_id ? [["行程组", event.trip_title || "未命名行程"]] : []),
       ],
       locationText,
       locations: isTravel ? [origin, destination].filter(Boolean) : [destination].filter(Boolean),
@@ -2676,7 +2694,7 @@ function renderChatConfirmationPreview(preview) {
     }
     return;
   }
-  container.innerHTML = events.map((event) => {
+  const eventRows = events.map((event) => {
     const start = parseDate(event.start_time);
     const end = parseDate(event.end_time);
     const time = start && end
@@ -2693,6 +2711,14 @@ function renderChatConfirmationPreview(preview) {
       </div>
     `;
   }).join("");
+  const deletedCount = Array.isArray(preview.deleted_event_ids)
+    ? preview.deleted_event_ids.length
+    : 0;
+  container.innerHTML = `
+    ${preview.trip_title ? `<div class="chat-confirm-trip-title"><strong>${escapeHtml(preview.trip_title)}</strong>${preview.shift_minutes ? `<span>整体${preview.shift_minutes > 0 ? "顺延" : "提前"} ${Math.abs(preview.shift_minutes)} 分钟</span>` : ""}</div>` : ""}
+    ${eventRows}
+    ${deletedCount ? `<div class="chat-confirm-delete">将删除 ${deletedCount} 段行程</div>` : ""}
+  `;
 }
 
 function renderMarkdown(value) {
@@ -2879,23 +2905,73 @@ async function reconnectAgent() {
 function renderAgentTrace(data) {
   const trace = $("agentTrace");
   const content = $("agentTraceContent");
+  const meta = $("agentTraceMeta");
   const calls = data.tool_calls || [];
-  const changes = data.applied_changes || [];
-  if (!trace || !content || (!calls.length && !changes.length)) {
+  const workflow = data.steps || data.workflow_steps || [];
+  if (!trace || !content || (!calls.length && !workflow.length)) {
     trace?.classList.add("hidden");
     return;
   }
-  const workflow = data.workflow_steps || [];
   const traceItems = workflow.length ? workflow : calls;
+  const statusName = {
+    completed: "已完成",
+    waiting_confirmation: "待确认",
+    warning: "有提醒",
+    failed: "失败",
+  }[data.status || data.run_status] || "已完成";
+  if (meta) {
+    const duration = data.duration_ms === undefined ? "" : `${data.duration_ms} ms`;
+    const toolCount = data.tool_count ?? traceItems.filter((item) => item.kind === "tool").length;
+    meta.innerHTML = `
+      <span>${escapeHtml(statusName)}</span>
+      <span>${toolCount} 次工具调用</span>
+      ${duration ? `<span>${escapeHtml(duration)}</span>` : ""}
+      ${data.provider ? `<span>${escapeHtml(data.provider)}</span>` : ""}
+      ${data.model_usage?.total_tokens ? `<span>${escapeHtml(`${data.model_usage.total_tokens} tokens`)}</span>` : ""}
+      ${data.estimated_cost ? `<span>${escapeHtml(`估算成本 ${Number(data.estimated_cost).toFixed(6)}`)}</span>` : ""}
+    `;
+  }
   const rows = traceItems.map((call) => `
     <div class="trace-row">
-      <span class="trace-state ${(call.success ?? call.status !== "failed") ? "ok" : "failed"}">${escapeHtml(call.stage || ((call.success ?? call.status !== "failed") ? "完成" : "失败"))}</span>
-      <strong>${escapeHtml(call.name || "")}</strong>
-      <span>${escapeHtml(call.summary || "")}</span>
+      <span class="trace-state ${traceStateClass(call)}">${escapeHtml(call.stage || "执行")}</span>
+      <strong>${escapeHtml(call.label || call.name || "")}</strong>
+      <span>${escapeHtml(call.summary || "")}${call.duration_ms ? ` · ${call.duration_ms} ms` : ""}</span>
     </div>
   `);
   content.innerHTML = rows.join("");
   trace.classList.remove("hidden");
+}
+
+function traceStateClass(item) {
+  const status = item.status || (item.success ? "completed" : "failed");
+  if (status === "failed") return "failed";
+  if (status === "warning") return "warning";
+  if (status === "waiting") return "waiting";
+  return "ok";
+}
+
+async function loadAgentRuns() {
+  state.agentRuns = await api(`/agent/sessions/${state.chatSessionId}/runs?limit=20`);
+  const select = $("agentRunSelect");
+  if (select) {
+    select.innerHTML = state.agentRuns.map((run, index) => {
+      const created = parseDate(run.created_at);
+      const label = `${index === 0 ? "最近 · " : ""}${created ? `${formatDate(created)} ${formatTime(created)}` : "执行记录"}`;
+      return `<option value="${escapeHtml(run.id)}">${escapeHtml(label)}</option>`;
+    }).join("");
+  }
+  if (state.agentRuns.length) {
+    renderAgentTrace(state.agentRuns[0]);
+  } else {
+    $("agentTrace")?.classList.add("hidden");
+  }
+}
+
+function selectAgentRun(runId) {
+  const run = state.agentRuns.find((item) => item.id === runId);
+  if (run) {
+    renderAgentTrace(run);
+  }
 }
 
 function scrollChatToBottom() {
@@ -2954,6 +3030,7 @@ async function sendChatMessage() {
       await loadAllData();
     }
     await loadAgentStatus();
+    await loadAgentRuns().catch(handleError);
   } catch (error) {
     state.chatMessages.push({
       role: "assistant",
@@ -2992,6 +3069,7 @@ async function confirmChatDecision(decision) {
     if ((data.applied_changes || []).length || (data.proposed_schedules || []).length) {
       await loadAllData();
     }
+    await loadAgentRuns().catch(handleError);
   } catch (error) {
     state.chatMessages.push({
       role: "assistant",
@@ -3011,11 +3089,84 @@ async function clearChat() {
     await api(`/agent/sessions/${state.chatSessionId}/messages`, { method: "DELETE" });
     state.chatMessages = [];
     state.chatPendingConfirmation = null;
+    state.agentRuns = [];
     $("agentTrace")?.classList.add("hidden");
     renderChatMessages();
   } catch (error) {
     alert(`清空失败：${error.message}`);
   }
+}
+
+
+/* =========================
+   Agent 评测
+========================= */
+
+async function loadEvaluation() {
+  const latest = await api("/evaluations/latest");
+  state.evaluationsLoaded = true;
+  state.evaluationRun = latest;
+  renderEvaluation(latest);
+}
+
+async function runEvaluation() {
+  const button = $("evaluationRunButton");
+  if (button?.disabled) return;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "评测中";
+  }
+  try {
+    const result = await api("/evaluations/run", { method: "POST" });
+    state.evaluationRun = result;
+    renderEvaluation(result);
+  } catch (error) {
+    alert(`评测失败：${error.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "运行评测";
+    }
+  }
+}
+
+function renderEvaluation(run) {
+  const empty = $("evaluationEmpty");
+  const results = $("evaluationResults");
+  if (!run) {
+    empty?.classList.remove("hidden");
+    results?.classList.add("hidden");
+    return;
+  }
+  empty?.classList.add("hidden");
+  results?.classList.remove("hidden");
+  $("evaluationScore").textContent = Number(run.score || 0).toFixed(1);
+  const metrics = run.metrics || {};
+  $("evaluationMetrics").innerHTML = [
+    ["工具选择", `${metrics.tool_selection_accuracy ?? 0}%`],
+    ["工具成功", `${metrics.tool_success_rate ?? 0}%`],
+    ["约束通过", `${metrics.constraint_pass_rate ?? 0}%`],
+    ["确认安全", `${metrics.confirmation_safety_rate ?? 0}%`],
+    ["平均耗时", `${metrics.average_latency_ms ?? 0} ms`],
+    ["模型 Tokens", `${metrics.total_model_tokens ?? 0}`],
+    ["估算成本", `${Number(metrics.estimated_model_cost ?? 0).toFixed(6)}`],
+  ].map(([label, value]) => `
+    <div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>
+  `).join("");
+  $("evaluationScenarioRows").innerHTML = (run.results || []).map((item) => `
+    <tr>
+      <td><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml((item.actual_tools || []).join(" → "))}</small></td>
+      <td><span class="evaluation-result ${item.passed ? "pass" : "fail"}">${item.passed ? "通过" : "失败"}</span></td>
+      <td>${evaluationCheck(item.selection_passed)}</td>
+      <td>${evaluationCheck(item.constraints_passed)}</td>
+      <td>${evaluationCheck(item.confirmation_passed)}</td>
+      <td>${escapeHtml(`${item.duration_ms} ms`)}</td>
+    </tr>
+  `).join("");
+}
+
+function evaluationCheck(value) {
+  return `<span class="evaluation-check ${value ? "pass" : "fail"}">${value ? "通过" : "未通过"}</span>`;
 }
 
 

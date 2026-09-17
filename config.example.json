@@ -3,7 +3,9 @@
     "base_url": "https://api.openai.com/v1",
     "api_key": "sk-你的密钥",
     "model": "gpt-4o-mini",
-    "timeout": 30
+    "timeout": 30,
+    "input_price_per_million": 0,
+    "output_price_per_million": 0
   },
   "external": {
     "weather": {

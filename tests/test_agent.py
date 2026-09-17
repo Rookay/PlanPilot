@@ -349,3 +349,54 @@ class AgentLoopTests(TestCase):
 
         self.assertFalse(preview.success)
         self.assertIn("已有安排", preview.error)
+
+    def test_trip_revision_uses_one_confirmation_and_one_atomic_tool(self):
+        events = event_service.create_events(
+            self.db,
+            [
+                EventCreate(
+                    title=f"行程{index + 1}",
+                    start_time=datetime(2026, 9, 27, 2 + index),
+                    end_time=datetime(2026, 9, 27, 3 + index),
+                )
+                for index in range(3)
+            ],
+            trip_title="马鞍山第一天",
+        )
+        provider = MockProvider(
+            script=[
+                {
+                    "tool_calls": [
+                        {
+                            "name": "revise_trip",
+                            "arguments": {
+                                "trip_id": events[0].trip_id,
+                                "shift_minutes": 30,
+                            },
+                        }
+                    ]
+                }
+            ]
+        )
+        agent = Agent(
+            llm=provider,
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=PendingActionStore(),
+            skill_registry=build_default_skills(),
+        )
+
+        pending = agent.handle(self.db, "整体顺延半小时", "trip-revision")
+
+        self.assertTrue(pending.confirmation.required)
+        self.assertEqual([item["name"] for item in pending.tool_calls], ["revise_trip"])
+        completed = agent.handle(
+            self.db,
+            "",
+            "trip-revision",
+            confirm_action_id=pending.confirmation.action_id,
+            decision="accept",
+        )
+        self.assertEqual([item["name"] for item in completed.tool_calls], ["revise_trip"])
+        shifted = event_service.get_trip_events(self.db, events[0].trip_id)
+        self.assertEqual(shifted[0].start_time, datetime(2026, 9, 27, 2, 30))

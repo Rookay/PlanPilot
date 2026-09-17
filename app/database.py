@@ -138,7 +138,11 @@ def ensure_schema(target_engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE events ADD COLUMN travel_mode VARCHAR(20)"
             )
+        migrate_legacy_trips = bool(event_columns and "trip_id" not in event_columns)
         event_location_additions = {
+            "trip_id": "VARCHAR(32)",
+            "trip_title": "VARCHAR(200)",
+            "trip_order": "INTEGER",
             "location_city": "VARCHAR(100)",
             "location_longitude": "FLOAT",
             "location_latitude": "FLOAT",
@@ -194,6 +198,26 @@ def ensure_schema(target_engine) -> None:
                 "CREATE INDEX IF NOT EXISTS ix_events_origin_location_id "
                 "ON events (origin_location_id)"
             )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_events_trip_id ON events (trip_id)"
+            )
+            if migrate_legacy_trips and "start_time" in event_columns:
+                connection.exec_driver_sql(
+                    "UPDATE events SET "
+                    "trip_id = 'legacy-' || substr(start_time, 1, 10), "
+                    "trip_title = '历史行程' "
+                    "WHERE trip_id IS NULL AND substr(start_time, 1, 10) IN ("
+                    "SELECT substr(start_time, 1, 10) FROM events "
+                    "GROUP BY substr(start_time, 1, 10) HAVING COUNT(*) >= 3)"
+                )
+                connection.exec_driver_sql(
+                    "UPDATE events SET trip_order = ("
+                    "SELECT COUNT(*) FROM events earlier "
+                    "WHERE earlier.trip_id = events.trip_id "
+                    "AND (earlier.start_time < events.start_time "
+                    "OR (earlier.start_time = events.start_time AND earlier.id <= events.id))) "
+                    "WHERE trip_id IS NOT NULL AND trip_order IS NULL"
+                )
 
         schedule_columns = {
             row[1]
@@ -235,9 +259,17 @@ def ensure_schema(target_engine) -> None:
                 "ALTER TABLE chat_messages ADD COLUMN session_id VARCHAR(64) DEFAULT 'legacy'"
             )
         if chat_columns:
+            if "agent_run_id" not in chat_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE chat_messages ADD COLUMN agent_run_id VARCHAR(32)"
+                )
             connection.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_chat_messages_session_id "
                 "ON chat_messages (session_id)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_chat_messages_agent_run_id "
+                "ON chat_messages (agent_run_id)"
             )
 
 

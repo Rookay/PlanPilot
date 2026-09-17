@@ -5,7 +5,7 @@ from unittest.mock import patch
 from app.models.schedule import Schedule
 from fastapi import HTTPException
 from app.agent.context import build_world_summary
-from app.schemas.event import EventCreate, EventSeriesCreate, EventUpdate
+from app.schemas.event import EventCreate, EventSeriesCreate, EventUpdate, TripRevision
 from app.schemas.location import SavedLocationCreate
 from app.integrations.maps.schemas import RouteOption, RouteResponse
 from app.integrations.maps.base import MapNotConfiguredError
@@ -80,6 +80,57 @@ class ServiceTests(TestCase):
             event_service.create_events(self.db, items)
 
         self.assertEqual(event_service.list_events(self.db), [])
+
+    def test_trip_group_revision_shifts_all_events_atomically(self):
+        events = event_service.create_events(
+            self.db,
+            [
+                EventCreate(
+                    title=f"第{index + 1}段",
+                    start_time=datetime(2026, 9, 27, 2 + index),
+                    end_time=datetime(2026, 9, 27, 3 + index),
+                )
+                for index in range(3)
+            ],
+            trip_title="马鞍山第一天",
+        )
+        trip_id = events[0].trip_id
+        original = {event.id: event.start_time for event in events}
+
+        revised = event_service.apply_trip_revision(
+            self.db,
+            TripRevision(
+                trip_id=trip_id,
+                shift_minutes=60,
+                updates=[{"event_id": events[1].id, "title": "调整后的第二段"}],
+            ),
+        )
+
+        self.assertEqual({item.trip_id for item in revised}, {trip_id})
+        self.assertEqual([item.trip_order for item in revised], [1, 2, 3])
+        self.assertEqual(revised[1].title, "调整后的第二段")
+        self.assertTrue(
+            all(
+                (item.start_time - original[item.id]).total_seconds() == 3600
+                for item in revised
+            )
+        )
+
+        with self.assertRaises(HTTPException):
+            event_service.apply_trip_revision(
+                self.db,
+                TripRevision(
+                    trip_id=trip_id,
+                    updates=[
+                        {
+                            "event_id": revised[2].id,
+                            "start_time": revised[0].start_time,
+                        }
+                    ],
+                ),
+            )
+        unchanged = event_service.get_trip_events(self.db, trip_id)
+        self.assertEqual([item.start_time for item in unchanged], [item.start_time for item in revised])
 
     def test_planning_reserves_amap_travel_time_between_locations(self):
         event_service.create_event(

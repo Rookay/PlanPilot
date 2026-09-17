@@ -58,6 +58,9 @@ def get_daily_itinerary(
                 status="fixed",
                 event_type=event.event_type,
                 travel_mode=event.travel_mode,
+                trip_id=event.trip_id,
+                trip_title=event.trip_title,
+                trip_order=event.trip_order,
                 origin_location=(
                     _location_model(locations.get(event.origin_location_id))
                     or _custom_location(

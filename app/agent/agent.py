@@ -3,6 +3,8 @@
 # File    ：agent.py
 """Agent 门面：组装 LLM / Registry / Memory / Confirmation / Skills，并提供统一入口。"""
 
+import time
+
 from sqlalchemy.orm import Session
 
 from app.agent.confirmation import PendingActionStore
@@ -80,7 +82,9 @@ class Agent:
         errors: list = []
         tool_calls: list = []
         for call in pending.tool_calls:
+            started = time.perf_counter()
             result = self.registry.execute(call["name"], call["args"], db)
+            duration_ms = int((time.perf_counter() - started) * 1000)
             tool_calls.append(
                 {
                     "stage": self.loop._tool_stage(call["name"]),
@@ -88,6 +92,7 @@ class Agent:
                     "arguments": call["args"],
                     "success": result.success,
                     "summary": result.summary or result.error,
+                    "duration_ms": duration_ms,
                 }
             )
             if result.success:
@@ -127,10 +132,19 @@ class Agent:
         reply_before_audit = result.reply
         result.workflow_steps = [
             {
+                "kind": "tool",
                 "stage": item.get("stage") or self.loop._tool_stage(item.get("name", "")),
                 "name": item.get("name"),
-                "status": "completed" if item.get("success") else "failed",
+                "label": self.loop.tool_label(item.get("name", "")),
+                "status": (
+                    "waiting"
+                    if item.get("awaiting_confirmation") and result.confirmation.required
+                    else "completed"
+                    if item.get("success")
+                    else "failed"
+                ),
                 "summary": item.get("summary"),
+                "duration_ms": item.get("duration_ms", 0),
             }
             for item in result.tool_calls
         ]
@@ -138,8 +152,10 @@ class Agent:
             audit = schedule_service.audit_current_plan(db)
             result.workflow_steps.append(
                 {
+                    "kind": "audit",
                     "stage": "复查",
                     "name": "postflight_audit",
+                    "label": self.loop.tool_label("postflight_audit"),
                     "status": "completed" if audit["valid"] else "warning",
                     "summary": "未发现冲突" if audit["valid"] else "；".join(audit["issues"]),
                 }

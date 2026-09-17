@@ -82,10 +82,20 @@ class ApiWorkflowTests(TestCase):
             json={"message": "看看我的任务", "session_id": session_id},
         )
         self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["run_id"])
+        self.assertGreaterEqual(payload["duration_ms"], 0)
+        self.assertTrue(payload["workflow_steps"])
         history = self.client.get(
             f"/api/agent/sessions/{session_id}/messages"
         ).json()
         self.assertEqual([item["role"] for item in history], ["user", "assistant"])
+        self.assertEqual(history[-1]["agent_run_id"], payload["run_id"])
+        runs = self.client.get(
+            f"/api/agent/sessions/{session_id}/runs"
+        ).json()
+        self.assertEqual(runs[0]["id"], payload["run_id"])
+        self.assertTrue(runs[0]["steps"])
 
     def test_saved_locations_keep_exactly_one_default(self):
         home = self.client.post(
