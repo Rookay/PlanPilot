@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 from app.agent.confirmation import PendingActionStore
 from app.agent.loop import AgentLoop, AgentResult
 from app.agent.memory import Memory
+from app.agent.transaction import AgentDatabaseSnapshot
 from app.llm.base import LLMProvider
 from app.skills.base import SkillRegistry
 from app.tools.registry import ToolRegistry
+from app.services import schedule_service
 
 
 class Agent:
@@ -42,10 +44,12 @@ class Agent:
         decision: str | None = None,
     ) -> AgentResult:
         if confirm_action_id:
-            return self._handle_confirmation(
+            result = self._handle_confirmation(
                 db, confirm_action_id, decision or "accept", session_id
             )
-        return self.loop.run(db, message, session_id)
+        else:
+            result = self.loop.run(db, message, session_id)
+        return self._finalize_result(db, result)
 
     def _handle_confirmation(
         self,
@@ -69,28 +73,43 @@ class Agent:
             self.memory.add(session_id, "assistant", result.reply)
             return result
 
+        snapshot = AgentDatabaseSnapshot.capture(db)
         applied: list = []
         proposed: list = []
         summaries: list = []
         errors: list = []
+        tool_calls: list = []
         for call in pending.tool_calls:
             result = self.registry.execute(call["name"], call["args"], db)
+            tool_calls.append(
+                {
+                    "stage": self.loop._tool_stage(call["name"]),
+                    "name": call["name"],
+                    "arguments": call["args"],
+                    "success": result.success,
+                    "summary": result.summary or result.error,
+                }
+            )
             if result.success:
                 summaries.append(result.summary or call["name"])
                 applied.append({"name": call["name"], "summary": result.summary})
                 if (
-                    call["name"] in ("generate_plan", "replan")
+                    call["name"] in ("generate_plan", "replan", "replan_local")
                     and isinstance(result.data, dict)
                     and isinstance(result.data.get("schedules"), list)
                 ):
                     proposed = result.data["schedules"]
             else:
                 errors.append(result.error or f"{call['name']} 执行失败")
+                break
 
         self.confirmation_store.remove(action_id)
 
         if errors:
-            reply = "操作未能完成：" + "；".join(errors)
+            snapshot.restore(db)
+            applied = []
+            proposed = []
+            reply = "操作未能完成，已恢复修改前状态：" + "；".join(errors)
         else:
             reply = "已执行：" + "；".join(summaries) if summaries else "操作完成。"
 
@@ -99,6 +118,34 @@ class Agent:
             session_id=session_id,
             applied_changes=applied,
             proposed_schedules=proposed,
+            tool_calls=tool_calls,
         )
         self.memory.add(session_id, "assistant", result.reply)
+        return result
+
+    def _finalize_result(self, db: Session, result: AgentResult) -> AgentResult:
+        reply_before_audit = result.reply
+        result.workflow_steps = [
+            {
+                "stage": item.get("stage") or self.loop._tool_stage(item.get("name", "")),
+                "name": item.get("name"),
+                "status": "completed" if item.get("success") else "failed",
+                "summary": item.get("summary"),
+            }
+            for item in result.tool_calls
+        ]
+        if result.applied_changes and not result.confirmation.required:
+            audit = schedule_service.audit_current_plan(db)
+            result.workflow_steps.append(
+                {
+                    "stage": "复查",
+                    "name": "postflight_audit",
+                    "status": "completed" if audit["valid"] else "warning",
+                    "summary": "未发现冲突" if audit["valid"] else "；".join(audit["issues"]),
+                }
+            )
+            if audit["issues"]:
+                result.reply += " 复查发现：" + "；".join(audit["issues"])
+        if result.reply != reply_before_audit:
+            self.memory.replace_last_assistant(result.session_id, result.reply)
         return result

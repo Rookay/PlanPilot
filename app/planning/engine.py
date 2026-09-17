@@ -15,7 +15,7 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from typing import Callable, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 # 时间粒度（分钟）：所有自动生成的日程都会对齐到该粒度。
 SLOT_MINUTES = 15
@@ -41,6 +41,10 @@ class PlanTask:
     deadline: Optional[datetime] = None
     created_at: Optional[datetime] = None
     preferred_windows: List[Tuple[datetime, datetime]] = field(default_factory=list)
+    splittable: bool = False
+    min_chunk_minutes: int = 30
+    max_chunk_minutes: int = 120
+    dependency_ids: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +55,7 @@ class PlanAssignment:
     start_time: datetime
     end_time: datetime
     reason: str = ""
+    chunk_index: int = 1
 
 
 @dataclass
@@ -195,6 +200,8 @@ def generate_plan(
     tasks: Sequence[PlanTask],
     busy_intervals: Iterable[Tuple[datetime, datetime]],
     scheduled_task_ids: Set[int],
+    completed_task_ids: Optional[Set[int]] = None,
+    dependency_completion_times: Optional[Dict[int, datetime]] = None,
     day_start: time = DEFAULT_DAY_START,
     day_end: time = DEFAULT_DAY_END,
     windows: Optional[List[Tuple[datetime, datetime]]] = None,
@@ -245,17 +252,40 @@ def generate_plan(
     busy = _merge_intervals(busy)
 
     gap = timedelta(minutes=max(gap_minutes, 0))
-    ordered = sorted(tasks, key=lambda task: _sort_key(task, strategy))
+    ordered = _dependency_order(tasks, strategy)
 
     assignments: List[PlanAssignment] = []
     failures: List[PlanFailure] = []
+    completed = set(scheduled_task_ids) | set(completed_task_ids or set())
+    completion_times = dict(dependency_completion_times or {})
 
     for task in ordered:
-        if task.id in scheduled_task_ids:
+        if task.id in completed:
             continue
 
-        duration = timedelta(minutes=max(task.estimated_duration or 60, 1))
+        incomplete_dependencies = [
+            dependency_id
+            for dependency_id in task.dependency_ids
+            if dependency_id not in completed
+        ]
+        if incomplete_dependencies:
+            failures.append(
+                PlanFailure(
+                    task.id,
+                    task.title,
+                    "前置任务尚未完成：" + ", ".join(map(str, incomplete_dependencies)),
+                )
+            )
+            continue
+
         earliest = task.start_time or task.earliest_start or horizon_start
+        dependency_times = [
+            completion_times[item]
+            for item in task.dependency_ids
+            if item in completion_times
+        ]
+        if dependency_times:
+            earliest = max(earliest, max(dependency_times))
 
         if task.deadline is not None and task.deadline <= start:
             failures.append(
@@ -271,58 +301,123 @@ def generate_plan(
                 task, slot_start, slot_end, assignments
             )
         )
-        slot_start = None
-        used_preference = False
-        if preferred_windows:
-            slot_start = _find_free_slot(
-                windows=preferred_windows,
-                busy=busy,
-                duration=duration,
-                earliest=max(earliest, horizon_start),
-                deadline=task.deadline,
-                candidate_is_valid=validate_candidate,
-            )
-            used_preference = slot_start is not None
-
-        slot_start = slot_start or _find_free_slot(
-            windows=planning_windows,
-            busy=busy,
-            duration=duration,
-            earliest=max(earliest, horizon_start),
-            deadline=task.deadline,
-            candidate_is_valid=validate_candidate,
-        )
-
-        if slot_start is None:
-            failures.append(
-                PlanFailure(
-                    task.id,
-                    task.title,
-                    "在给定时间范围内找不到足够长的空闲时段",
+        remaining = max(task.estimated_duration or 60, 1)
+        chunk_index = 1
+        while remaining > 0:
+            chunk_candidates = _chunk_candidates(task, remaining)
+            selected = None
+            used_preference = False
+            for chunk_minutes in chunk_candidates:
+                duration = timedelta(minutes=chunk_minutes)
+                slot_start = None
+                if preferred_windows:
+                    slot_start = _find_free_slot(
+                        windows=preferred_windows,
+                        busy=busy,
+                        duration=duration,
+                        earliest=max(earliest, horizon_start),
+                        deadline=task.deadline,
+                        candidate_is_valid=validate_candidate,
+                    )
+                    used_preference = slot_start is not None
+                slot_start = slot_start or _find_free_slot(
+                    windows=planning_windows,
+                    busy=busy,
+                    duration=duration,
+                    earliest=max(earliest, horizon_start),
+                    deadline=task.deadline,
+                    candidate_is_valid=validate_candidate,
                 )
-            )
-            continue
+                if slot_start is not None:
+                    selected = (slot_start, duration, chunk_minutes)
+                    break
 
-        priority_labels = {"high": "高优先级", "medium": "中优先级", "low": "低优先级"}
-        reason_parts = [priority_labels.get(task.priority, "中优先级")]
-        if task.deadline is not None:
-            reason_parts.append("已考虑截止时间")
-        if used_preference:
-            reason_parts.append("符合偏好时段")
-        assignments.append(
-            PlanAssignment(
+            if selected is None:
+                detail = (
+                    f"，仍有 {remaining} 分钟未安排"
+                    if task.splittable and chunk_index > 1
+                    else ""
+                )
+                failures.append(
+                    PlanFailure(
+                        task.id,
+                        task.title,
+                        "在给定时间范围内找不到足够长的空闲时段" + detail,
+                    )
+                )
+                break
+
+            slot_start, duration, chunk_minutes = selected
+            priority_labels = {"high": "高优先级", "medium": "中优先级", "low": "低优先级"}
+            reason_parts = [priority_labels.get(task.priority, "中优先级")]
+            if task.deadline is not None:
+                reason_parts.append("已考虑截止时间")
+            if used_preference:
+                reason_parts.append("符合偏好时段")
+            if task.splittable and task.estimated_duration > chunk_minutes:
+                reason_parts.append(f"任务分段 {chunk_index}")
+            assignment = PlanAssignment(
                 task.id,
                 slot_start,
                 slot_start + duration,
                 " · ".join(reason_parts),
+                chunk_index=chunk_index,
             )
-        )
-        # 双向保护任务间隔：后续任务无论排在它之前还是之后都不会贴在一起。
-        busy = _merge_intervals(
-            busy + [(slot_start - gap, slot_start + duration + gap)]
-        )
+            assignments.append(assignment)
+            busy = _merge_intervals(
+                busy + [(slot_start - gap, slot_start + duration + gap)]
+            )
+            remaining -= chunk_minutes
+            chunk_index += 1
+            if not task.splittable:
+                break
+
+        if remaining <= 0:
+            completed.add(task.id)
+            completion_times[task.id] = max(
+                item.end_time for item in assignments if item.task_id == task.id
+            )
 
     return PlanResult(assignments=assignments, failures=failures)
+
+
+def _dependency_order(tasks: Sequence[PlanTask], strategy: str) -> List[PlanTask]:
+    """在原有优先级排序上加入稳定的拓扑顺序。"""
+
+    base = sorted(tasks, key=lambda task: _sort_key(task, strategy))
+    by_id = {task.id: task for task in base}
+    ordered: List[PlanTask] = []
+    visiting: Set[int] = set()
+    visited: Set[int] = set()
+
+    def visit(task: PlanTask) -> None:
+        if task.id in visited:
+            return
+        if task.id in visiting:
+            return
+        visiting.add(task.id)
+        for dependency_id in task.dependency_ids:
+            dependency = by_id.get(dependency_id)
+            if dependency is not None:
+                visit(dependency)
+        visiting.remove(task.id)
+        visited.add(task.id)
+        ordered.append(task)
+
+    for task in base:
+        visit(task)
+    return ordered
+
+
+def _chunk_candidates(task: PlanTask, remaining: int) -> List[int]:
+    if not task.splittable:
+        return [remaining]
+    maximum = min(max(task.max_chunk_minutes, 15), remaining)
+    minimum = min(max(task.min_chunk_minutes, 15), remaining)
+    candidates = list(range(maximum, minimum - 1, -SLOT_MINUTES))
+    if minimum not in candidates:
+        candidates.append(minimum)
+    return list(dict.fromkeys(candidates))
 
 
 # ---------------------------------------------------------------------------

@@ -120,4 +120,5 @@ def agent_chat(
             changes=result.confirmation.changes,
             preview=result.confirmation.preview,
         ),
+        workflow_steps=result.workflow_steps,
     )

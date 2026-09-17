@@ -123,12 +123,13 @@ class UpdateScheduleTool(Tool):
                 "type": "string",
                 "enum": ["proposed", "accepted", "completed", "cancelled"],
             },
+            "is_locked": {"type": "boolean", "description": "锁定后自动规划不会移动该日程"},
         },
         "required": ["schedule_id"],
         "additionalProperties": False,
     }
     output_schema = {"type": "object"}
-    confirmation = "auto"
+    confirmation = "confirm"
 
     def execute(self, db: Session, **kwargs: Any) -> ToolResult:
         schedule_id = kwargs.pop("schedule_id")
@@ -148,6 +149,36 @@ class UpdateScheduleTool(Tool):
             success=True,
             data=schedule_to_dict(schedule),
             summary=f"已更新日程 #{schedule.id}",
+        )
+
+    def preview(self, db: Session, **kwargs: Any) -> ToolResult:
+        schedule_id = kwargs.get("schedule_id")
+        schedule = db.query(Schedule).filter(Schedule.id == schedule_id).first()
+        if schedule is None:
+            return ToolResult(success=False, error="Schedule not found")
+        update = dict(kwargs)
+        update.pop("schedule_id", None)
+        for key in ("start_time", "end_time"):
+            if key in update:
+                update[key] = parse_naive_utc(update[key])
+        if set(update) == {"is_locked"}:
+            preview_data = {"valid": True, "warnings": [], "conflicts": []}
+        else:
+            try:
+                preview = schedule_service.preview_schedule_update(
+                    db, schedule_id, ScheduleUpdate(**update)
+                )
+            except Exception as exc:  # noqa: BLE001
+                return ToolResult(success=False, error=str(exc))
+            if not preview.valid:
+                return ToolResult(success=False, error="；".join(preview.conflicts))
+            preview_data = preview.model_dump()
+        action = "锁定状态" if set(update) == {"is_locked"} else "时间或状态"
+        return ToolResult(
+            success=True,
+            needs_confirmation=True,
+            data=preview_data,
+            summary=f"将修改日程 #{schedule.id} 的{action}",
         )
 
 

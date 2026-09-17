@@ -41,3 +41,4 @@ class AgentChatResponse(BaseModel):
     applied_changes: List[dict] = Field(default_factory=list)
     proposed_schedules: List[dict] = Field(default_factory=list)
     confirmation: ConfirmationInfoSchema = Field(default_factory=ConfirmationInfoSchema)
+    workflow_steps: List[dict] = Field(default_factory=list)

@@ -4,12 +4,13 @@
 # IDE     ：PyCharm 
 # Author  ：刘景涛
 # Date    ：2026/9/11 14:12
-from app.models.task import Task
+from app.models.task import Task, TaskDependency
 from app.models.event import Event
 from app.models.schedule import Schedule
 from app.models.chat import ChatMessage
 from app.models.preference import UserPreference
 from app.models.location import SavedLocation
+from app.models.plan_version import PlanVersion
 
 __all__ = [
     "Task",
@@ -18,4 +19,6 @@ __all__ = [
     "ChatMessage",
     "UserPreference",
     "SavedLocation",
+    "TaskDependency",
+    "PlanVersion",
 ]

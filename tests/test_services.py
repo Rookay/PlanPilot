@@ -10,7 +10,7 @@ from app.schemas.location import SavedLocationCreate
 from app.integrations.maps.schemas import RouteOption, RouteResponse
 from app.integrations.maps.base import MapNotConfiguredError
 from app.schemas.preference import PreferenceUpdate
-from app.schemas.schedule import ScheduleGenerateRequest
+from app.schemas.schedule import LocalReplanRequest, ScheduleGenerateRequest, ScheduleUpdate
 from app.schemas.task import TaskCreate, TaskUpdate
 from app.services import (
     event_service,
@@ -470,6 +470,118 @@ class ServiceTests(TestCase):
         self.assertTrue(all(value == 118.80 for value in route_origins))
         self.assertEqual(travel_leg.origin_id, f"{travel.id}:origin")
         self.assertEqual(travel_leg.suggested_departure, travel.start_time)
+
+    def test_task_dependencies_reject_cycles(self):
+        first = task_service.create_task(self.db, TaskCreate(title="任务A"))
+        second = task_service.create_task(
+            self.db,
+            TaskCreate(title="任务B", dependency_ids=[first.id]),
+        )
+        with self.assertRaises(HTTPException) as context:
+            task_service.update_task(
+                self.db,
+                first.id,
+                TaskUpdate(dependency_ids=[second.id]),
+            )
+        self.assertIn("循环", context.exception.detail)
+
+    def test_locked_schedule_is_preserved_by_local_replan(self):
+        first = task_service.create_task(
+            self.db,
+            TaskCreate(title="锁定任务", estimated_duration=60),
+        )
+        second = task_service.create_task(
+            self.db,
+            TaskCreate(title="可移动任务", estimated_duration=60),
+        )
+        locked = schedule_service.create_schedule(
+            self.db,
+            first.id,
+            datetime(2026, 9, 16, 1),
+            datetime(2026, 9, 16, 2),
+            status="accepted",
+        )
+        schedule_service.update_schedule(
+            self.db,
+            locked.id,
+            ScheduleUpdate(is_locked=True),
+        )
+        movable = schedule_service.create_schedule(
+            self.db,
+            second.id,
+            datetime(2026, 9, 16, 4),
+            datetime(2026, 9, 16, 5),
+            status="accepted",
+        )
+
+        result = schedule_service.apply_local_replan(
+            self.db,
+            LocalReplanRequest(
+                start=datetime(2026, 9, 16, 1),
+                end=datetime(2026, 9, 16, 6),
+            ),
+        )
+
+        schedules = schedule_service.list_schedules(self.db)
+        kept = next(item for item in schedules if item.task_id == first.id)
+        moved = next(item for item in schedules if item.task_id == second.id)
+        self.assertEqual(kept.id, locked.id)
+        self.assertTrue(kept.is_locked)
+        self.assertEqual(moved.id, movable.id)
+        self.assertEqual(moved.start_time, datetime(2026, 9, 16, 2))
+        self.assertTrue(result["version_id"])
+
+    def test_latest_plan_version_can_be_undone(self):
+        task = task_service.create_task(self.db, TaskCreate(title="可撤销任务"))
+        schedule = schedule_service.create_schedule(
+            self.db,
+            task.id,
+            datetime(2026, 9, 16, 1),
+            datetime(2026, 9, 16, 2),
+            status="accepted",
+        )
+        schedule_service.update_schedule(
+            self.db,
+            schedule.id,
+            ScheduleUpdate(
+                start_time=datetime(2026, 9, 16, 3),
+                end_time=datetime(2026, 9, 16, 4),
+            ),
+        )
+        schedule_service.undo_latest_plan(self.db)
+        restored = schedule_service.list_schedules(self.db)[0]
+        self.assertEqual(restored.start_time, datetime(2026, 9, 16, 1))
+        self.assertEqual(restored.end_time, datetime(2026, 9, 16, 2))
+
+    def test_service_generates_all_chunks_for_splittable_task(self):
+        task = task_service.create_task(
+            self.db,
+            TaskCreate(
+                title="分段任务",
+                estimated_duration=180,
+                splittable=True,
+                min_chunk_minutes=30,
+                max_chunk_minutes=60,
+            ),
+        )
+        result = schedule_service.generate_schedules(
+            self.db,
+            ScheduleGenerateRequest(
+                start=datetime(2026, 9, 16, 1),
+                days=1,
+                windows=[
+                    {
+                        "start": datetime(2026, 9, 16, 1),
+                        "end": datetime(2026, 9, 16, 7),
+                    }
+                ],
+                gap_minutes=0,
+            ),
+        )
+        chunks = [item for item in result.schedules if item.task_id == task.id]
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual([item.chunk_index for item in chunks], [1, 2, 3])
+        self.assertTrue(result.version_id)
 
     def test_smart_itinerary_mixes_modes_without_teleporting_the_car(self):
         location_service.create_location(

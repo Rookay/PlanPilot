@@ -21,7 +21,9 @@ from app.tools.planning_tools import (
     CheckConflictsTool,
     EvaluatePlanTool,
     GeneratePlanTool,
+    LocalReplanTool,
     ReplanTool,
+    UndoPlanTool,
 )
 from app.tools.preference_tools import GetPreferencesTool, UpdatePreferencesTool
 from app.tools.registry import ToolRegistry
@@ -71,6 +73,8 @@ def build_default_registry() -> ToolRegistry:
         CheckConflictsTool(),
         EvaluatePlanTool(),
         ReplanTool(),
+        LocalReplanTool(),
+        UndoPlanTool(),
         # Preference
         GetPreferencesTool(),
         UpdatePreferencesTool(),

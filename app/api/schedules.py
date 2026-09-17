@@ -16,6 +16,9 @@ from app.database import get_db
 from app.schemas.schedule import (
     ScheduleGenerateRequest,
     ScheduleGenerateResponse,
+    LocalReplanRequest,
+    PlanVersionResponse,
+    ScheduleMovePreview,
     ScheduleResponse,
     ScheduleUpdate,
 )
@@ -71,6 +74,35 @@ def evaluate_schedules(
     }
 
 
+@router.post("/replan-local/preview")
+def preview_local_replan(
+    payload: LocalReplanRequest,
+    db: Session = Depends(get_db),
+):
+    return schedule_service.local_replan_preview(db, payload)
+
+
+@router.post("/replan-local")
+def apply_local_replan(
+    payload: LocalReplanRequest,
+    db: Session = Depends(get_db),
+):
+    return schedule_service.apply_local_replan(db, payload)
+
+
+@router.get("/versions", response_model=List[PlanVersionResponse])
+def list_plan_versions(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    return schedule_service.list_plan_versions(db, limit)
+
+
+@router.post("/versions/undo-latest")
+def undo_latest_plan(db: Session = Depends(get_db)):
+    return schedule_service.undo_latest_plan(db)
+
+
 @router.delete("")
 def clear_schedules(db: Session = Depends(get_db)):
     """清空全部自动生成的日程提议。"""
@@ -85,6 +117,15 @@ def update_schedule(
     db: Session = Depends(get_db),
 ):
     return schedule_service.update_schedule(db, schedule_id, payload)
+
+
+@router.post("/{schedule_id}/move-preview", response_model=ScheduleMovePreview)
+def preview_schedule_move(
+    schedule_id: int,
+    payload: ScheduleUpdate,
+    db: Session = Depends(get_db),
+):
+    return schedule_service.preview_schedule_update(db, schedule_id, payload)
 
 
 @router.delete("/{schedule_id}")

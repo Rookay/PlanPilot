@@ -36,6 +36,7 @@ class AgentResult:
     applied_changes: List[dict] = field(default_factory=list)
     proposed_schedules: List[dict] = field(default_factory=list)
     confirmation: ConfirmationInfo = field(default_factory=ConfirmationInfo)
+    workflow_steps: List[dict] = field(default_factory=list)
 
 
 class AgentLoop:
@@ -173,6 +174,7 @@ class AgentLoop:
 
                 tool_call_log.append(
                     {
+                        "stage": self._tool_stage(call.name),
                         "name": call.name,
                         "arguments": call.arguments,
                         "success": result.success,
@@ -307,6 +309,16 @@ class AgentLoop:
             sort_keys=True,
             default=str,
         )
+
+    @staticmethod
+    def _tool_stage(name: str) -> str:
+        if name.startswith("get_") or name in {"find_free_slots"}:
+            return "读取"
+        if name in {"evaluate_plan", "check_conflicts", "estimate_travel_time"}:
+            return "验证"
+        if name in {"generate_plan", "replan", "replan_local"}:
+            return "规划"
+        return "执行"
 
     @staticmethod
     def _progress_reply(tool_call_log: List[dict], proposed_schedules: List[dict]) -> str:

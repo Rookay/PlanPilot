@@ -2,7 +2,7 @@
 # Project ：mine
 # File    ：task.py
 from datetime import datetime
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -18,6 +18,10 @@ class TaskBase(BaseModel):
     priority: TaskPriority = "medium"
 
     estimated_duration: int = Field(default=60, ge=1, le=24 * 60)
+    splittable: bool = False
+    min_chunk_minutes: int = Field(default=30, ge=15, le=8 * 60)
+    max_chunk_minutes: int = Field(default=120, ge=15, le=12 * 60)
+    dependency_ids: List[int] = Field(default_factory=list)
 
     start_time: Optional[datetime] = None
 
@@ -60,6 +64,8 @@ class TaskBase(BaseModel):
             raise ValueError("开始时间不能晚于截止时间")
         if (self.location_longitude is None) != (self.location_latitude is None):
             raise ValueError("地点经度和纬度必须同时提供")
+        if self.min_chunk_minutes > self.max_chunk_minutes:
+            raise ValueError("最小分段时长不能大于最大分段时长")
         return self
 
 
@@ -79,6 +85,10 @@ class TaskUpdate(BaseModel):
         ge=1,
         le=24 * 60,
     )
+    splittable: Optional[bool] = None
+    min_chunk_minutes: Optional[int] = Field(default=None, ge=15, le=8 * 60)
+    max_chunk_minutes: Optional[int] = Field(default=None, ge=15, le=12 * 60)
+    dependency_ids: Optional[List[int]] = None
 
     start_time: Optional[datetime] = None
 

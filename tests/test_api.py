@@ -127,3 +127,48 @@ class ApiWorkflowTests(TestCase):
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["label"], "家")
         self.assertTrue(remaining[0]["is_default"])
+
+    def test_plan_versions_lock_and_undo_work_through_api(self):
+        task = self.client.post(
+            "/api/tasks",
+            json={
+                "title": "可拆分项目",
+                "estimated_duration": 120,
+                "splittable": True,
+                "min_chunk_minutes": 30,
+                "max_chunk_minutes": 60,
+            },
+        )
+        self.assertEqual(task.status_code, 200, task.text)
+        plan = self.client.post(
+            "/api/schedules/generate",
+            json={
+                "start": "2026-09-16T01:00:00Z",
+                "days": 1,
+                "windows": [
+                    {
+                        "start": "2026-09-16T01:00:00Z",
+                        "end": "2026-09-16T06:00:00Z",
+                    }
+                ],
+                "gap_minutes": 0,
+            },
+        )
+        self.assertEqual(plan.status_code, 200, plan.text)
+        self.assertEqual(len(plan.json()["schedules"]), 2)
+        schedule_id = plan.json()["schedules"][0]["id"]
+
+        locked = self.client.patch(
+            f"/api/schedules/{schedule_id}",
+            json={"is_locked": True},
+        )
+        self.assertEqual(locked.status_code, 200, locked.text)
+        self.assertTrue(locked.json()["is_locked"])
+
+        versions = self.client.get("/api/schedules/versions").json()
+        self.assertGreaterEqual(len(versions), 2)
+        undone = self.client.post("/api/schedules/versions/undo-latest")
+        self.assertEqual(undone.status_code, 200, undone.text)
+        schedules = self.client.get("/api/schedules").json()
+        restored = next(item for item in schedules if item["id"] == schedule_id)
+        self.assertFalse(restored["is_locked"])

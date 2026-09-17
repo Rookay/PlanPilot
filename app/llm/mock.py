@@ -68,11 +68,40 @@ class MockProvider(LLMProvider):
         tool_messages = [item for item in messages if item.get("role") == "tool"]
         executed = [item.get("name") for item in tool_messages]
         wants_plan = "安排" in last_user or "规划" in last_user or "排期" in last_user
+        wants_undo_plan = any(
+            phrase in last_user
+            for phrase in ("撤销计划", "撤销排期", "撤销刚才", "恢复上次计划")
+        )
+        wants_local_replan = any(
+            phrase in last_user for phrase in ("局部重排", "重排本周", "重新安排本周")
+        )
         urgent = any(word in last_user for word in ("急", "尽快", "优先"))
         wants_weather = any(word in last_user for word in ("天气", "下雨", "下雪", "降温"))
         wants_delete_events = any(word in last_user for word in ("删除", "清空")) and any(
             word in last_user for word in ("事件", "行程", "出去玩", "固定安排")
         )
+
+        if wants_undo_plan and "undo_latest_plan" not in executed:
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(id="mock_undo_plan", name="undo_latest_plan", arguments={})
+                ]
+            )
+
+        if wants_local_replan and "replan_local" not in executed:
+            start = utcnow().replace(minute=0, second=0, microsecond=0)
+            return LLMResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="mock_local_replan",
+                        name="replan_local",
+                        arguments={
+                            "start": start.isoformat() + "Z",
+                            "end": (start + timedelta(days=7)).isoformat() + "Z",
+                        },
+                    )
+                ]
+            )
 
         if wants_delete_events:
             if "get_events" not in executed:

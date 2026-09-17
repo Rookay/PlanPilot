@@ -108,6 +108,9 @@ def ensure_schema(target_engine) -> None:
             "location_city": "VARCHAR(100)",
             "location_longitude": "FLOAT",
             "location_latitude": "FLOAT",
+            "splittable": "BOOLEAN NOT NULL DEFAULT 0",
+            "min_chunk_minutes": "INTEGER NOT NULL DEFAULT 30",
+            "max_chunk_minutes": "INTEGER NOT NULL DEFAULT 120",
         }
         for name, sql_type in task_location_additions.items():
             if columns and name not in columns:
@@ -160,6 +163,10 @@ def ensure_schema(target_engine) -> None:
             "plan_batch_id": "VARCHAR(32)",
             "reason": "TEXT",
             "updated_at": "DATETIME",
+            "plan_version_id": "VARCHAR(32)",
+            "is_locked": "BOOLEAN NOT NULL DEFAULT 0",
+            "chunk_index": "INTEGER NOT NULL DEFAULT 1",
+            "source": "VARCHAR(20) NOT NULL DEFAULT 'auto'",
         }
         for name, sql_type in schedule_additions.items():
             if schedule_columns and name not in schedule_columns:
@@ -173,6 +180,10 @@ def ensure_schema(target_engine) -> None:
             connection.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_schedules_plan_batch_id "
                 "ON schedules (plan_batch_id)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_schedules_plan_version_id "
+                "ON schedules (plan_version_id)"
             )
 
         chat_columns = {

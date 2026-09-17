@@ -37,6 +37,14 @@ class Memory:
     def clear(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
 
+    def replace_last_assistant(self, session_id: str, content: str) -> None:
+        """同步 Agent 在执行后审计阶段补充的最终回复。"""
+
+        for message in reversed(self._sessions.get(session_id, [])):
+            if message.get("role") == "assistant":
+                message["content"] = content
+                return
+
     def has_session(self, session_id: str) -> bool:
         return session_id in self._sessions
 

@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.schemas.schedule import ScheduleGenerateRequest, ScheduleWindow
+from app.schemas.schedule import LocalReplanRequest, ScheduleGenerateRequest, ScheduleWindow
 from app.services import schedule_service
 from app.tools.base import Tool, ToolResult
 from app.utils import parse_naive_utc
@@ -255,4 +255,98 @@ class ReplanTool(Tool):
             needs_confirmation=True,
             data=preview,
             summary=f"将移除 {removed_count} 条旧日程，生成 {proposed_count} 条新日程",
+        )
+
+
+class LocalReplanTool(Tool):
+    name = "replan_local"
+    description = "在指定时间范围内保留锁定日程，只重排未锁定任务安排。"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "description": "范围开始时间 ISO 8601 UTC"},
+            "end": {"type": "string", "description": "范围结束时间 ISO 8601 UTC"},
+            "gap_minutes": {"type": "integer"},
+            "strategy": {
+                "type": "string",
+                "enum": ["balanced", "deadline_first", "priority_first"],
+            },
+            "include_unscheduled": {"type": "boolean"},
+        },
+        "required": ["start", "end"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
+    confirmation = "confirm"
+
+    @staticmethod
+    def _payload(kwargs: dict) -> LocalReplanRequest:
+        return LocalReplanRequest(
+            start=parse_naive_utc(kwargs.get("start")),
+            end=parse_naive_utc(kwargs.get("end")),
+            gap_minutes=kwargs.get("gap_minutes"),
+            strategy=kwargs.get("strategy"),
+            include_unscheduled=bool(kwargs.get("include_unscheduled", False)),
+        )
+
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            result = schedule_service.apply_local_replan(db, self._payload(kwargs))
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        return ToolResult(
+            success=True,
+            data=result,
+            summary=f"局部重排完成，共生成 {len(result['schedules'])} 条安排",
+        )
+
+    def preview(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            preview = schedule_service.local_replan_preview(db, self._payload(kwargs))
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        return ToolResult(
+            success=True,
+            needs_confirmation=True,
+            data=preview,
+            summary=(
+                f"将保留 {preview['kept_locked']} 条锁定日程，"
+                f"重排 {len(preview['removed'])} 条安排"
+            ),
+        )
+
+
+class UndoPlanTool(Tool):
+    name = "undo_latest_plan"
+    description = "撤销最近一次日程规划或调整，恢复修改前的日程。"
+    input_schema = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
+    confirmation = "confirm"
+
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            result = schedule_service.undo_latest_plan(db)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        return ToolResult(
+            success=True,
+            data=result,
+            summary=f"已撤销计划版本 {result['version']['id']}",
+        )
+
+    def preview(self, db: Session, **kwargs: Any) -> ToolResult:
+        versions = schedule_service.list_plan_versions(db, 100)
+        active = next((item for item in versions if item["status"] == "active"), None)
+        if active is None:
+            return ToolResult(success=False, error="没有可撤销的计划修改")
+        return ToolResult(
+            success=True,
+            needs_confirmation=True,
+            data=active,
+            summary=f"将撤销：{active['summary']}",
         )

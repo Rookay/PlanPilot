@@ -33,6 +33,10 @@ class DatabaseMigrationTests(TestCase):
         chat_columns = {item["name"] for item in inspector.get_columns("chat_messages")}
 
         self.assertIn("start_time", task_columns)
+        self.assertTrue(
+            {"splittable", "min_chunk_minutes", "max_chunk_minutes"}
+            <= task_columns
+        )
         self.assertIn("location_id", task_columns)
         self.assertIn("location_id", event_columns)
         self.assertIn("event_type", event_columns)
@@ -55,6 +59,10 @@ class DatabaseMigrationTests(TestCase):
             <= event_columns
         )
         self.assertTrue({"plan_batch_id", "reason", "updated_at"} <= schedule_columns)
+        self.assertTrue(
+            {"plan_version_id", "is_locked", "chunk_index", "source"}
+            <= schedule_columns
+        )
         self.assertIn("session_id", chat_columns)
         with engine.connect() as connection:
             updated_at = connection.exec_driver_sql(

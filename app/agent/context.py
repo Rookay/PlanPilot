@@ -31,6 +31,8 @@ _SYSTEM_PROMPT = """你是 PlanPilot 的个人规划助手，帮助用户管理�
 11. 严格区分三类数据：外部时间已确定且不可移动的是 Event（固定行程）；尚未确定具体时刻、可由规划器移动的是 Task；Schedule 是系统为 Task 生成的任务安排，不能脱离 Task 创建。不要为了展示一天行程而把所有活动都创建成 Event。
 12. 一次请求中若有两个及以上连续的不同地点，写入安排前必须逐段调用 estimate_travel_time，并在前一项结束和后一项开始之间完整预留工具返回的通勤时间。固定时间无法满足时不要创建明知会迟到的安排，应指出差额并请用户调整；generate_plan 已内置同样的高德通勤约束。
 13. 固定行程的时间段本身用于赶路（如“前往新街口”“返回学校”）时，创建或更新事件必须设置 event_type="travel"；此时 origin_location（及其城市、经纬度或常用地点 id）表示出发地，location 表示目的地，start_time 是出发时间，end_time 是最晚到达时间。已知出发地时必须填写；只有紧接上一事项出发且地点相同时才可省略，由系统继承上一地点。其它会议、用餐、游玩等使用 event_type="activity"。
+14. 用户要求长任务分段时，通过 update_task 设置 splittable=true，并合理设置 min_chunk_minutes、max_chunk_minutes；用户说明先后关系时写入 dependency_ids，不得仅记录在描述中。
+15. 已锁定日程不可移动。用户要求调整某一天或某一周时，优先使用 replan_local，先预览并统一确认；用户要求撤销最近的日程修改时使用 undo_latest_plan。
 
 时区规则（非常重要）：
 - 系统内部统一使用 UTC 存储时间，传给工具的时间必须是 UTC（ISO 8601，带 Z 后缀）。
@@ -103,7 +105,8 @@ def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int
             task_location = location_names.get(task.location_id) or task.location or "无"
             lines.append(
                 f"- #{task.id} {task.title} | 时长 {task.estimated_duration} 分 | "
-                f"优先级 {task.priority} | 截止 {deadline} | 地点 {task_location}"
+                f"优先级 {task.priority} | 截止 {deadline} | 地点 {task_location} | "
+                f"拆分 {'是' if task.splittable else '否'} | 前置 {task.dependency_ids or '无'}"
             )
     else:
         lines.append("- （无）")
@@ -135,7 +138,8 @@ def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int
         for schedule in schedules:
             lines.append(
                 f"- #{schedule.id} 任务#{schedule.task_id} | "
-                f"{schedule.start_time} ~ {schedule.end_time} | {schedule.status}"
+                f"{schedule.start_time} ~ {schedule.end_time} | {schedule.status} | "
+                f"分段 {schedule.chunk_index} | {'已锁定' if schedule.is_locked else '未锁定'}"
             )
     else:
         lines.append("- （无）")

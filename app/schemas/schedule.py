@@ -15,6 +15,9 @@ class ScheduleBase(BaseModel):
     start_time: datetime
     end_time: datetime
     status: ScheduleStatus = "proposed"
+    is_locked: bool = False
+    chunk_index: int = Field(default=1, ge=1)
+    source: str = Field(default="auto", max_length=20)
 
     @model_validator(mode="after")
     def _check_time_range(self):
@@ -31,6 +34,7 @@ class ScheduleUpdate(BaseModel):
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     status: Optional[ScheduleStatus] = None
+    is_locked: Optional[bool] = None
 
 
 class ScheduleResponse(ScheduleBase):
@@ -40,6 +44,7 @@ class ScheduleResponse(ScheduleBase):
     created_at: datetime
     updated_at: datetime
     plan_batch_id: Optional[str] = None
+    plan_version_id: Optional[str] = None
     reason: Optional[str] = None
 
 
@@ -90,3 +95,34 @@ class ScheduleGenerateResponse(BaseModel):
     unscheduled: List[UnscheduledTask]
     analysis: PlanAnalysis
     batch_id: Optional[str] = None
+    version_id: Optional[str] = None
+
+
+class LocalReplanRequest(BaseModel):
+    start: datetime
+    end: datetime
+    gap_minutes: Optional[int] = Field(default=None, ge=0, le=240)
+    strategy: Optional[PlanningStrategy] = None
+    include_unscheduled: bool = False
+
+    @model_validator(mode="after")
+    def _check_range(self):
+        if self.end <= self.start:
+            raise ValueError("局部重排结束时间必须晚于开始时间")
+        return self
+
+
+class PlanVersionResponse(BaseModel):
+    id: str
+    action: str
+    summary: str
+    status: str
+    changes: List[dict] = Field(default_factory=list)
+    created_at: datetime
+    undone_at: Optional[datetime] = None
+
+
+class ScheduleMovePreview(BaseModel):
+    valid: bool
+    warnings: List[str] = Field(default_factory=list)
+    conflicts: List[str] = Field(default_factory=list)

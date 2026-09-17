@@ -308,12 +308,27 @@
                 <button class="ghost-button" onclick="clearSchedules()">
                     清空待确认安排
                 </button>
+
+                <button class="ghost-button" onclick="replanCurrentWeek()">
+                    局部重排本周
+                </button>
+
+                <button class="ghost-button" onclick="undoLatestPlan()">
+                    撤销最近修改
+                </button>
             </div>
 
             <div id="planningTimetable" class="timetable-host"></div>
 
             <div id="planAnalysis" class="plan-analysis hidden"></div>
             <div id="scheduleResult"></div>
+            <section class="plan-history-section">
+                <div class="plan-history-heading">
+                    <h3>计划版本</h3>
+                    <button class="ghost-button" type="button" onclick="loadPlanVersions()">刷新</button>
+                </div>
+                <div id="planVersionList" class="plan-version-list"></div>
+            </section>
 
         </section>
 
@@ -479,6 +494,21 @@
                 min="1"
                 value="60">
         </label>
+
+        <div class="task-planning-options">
+            <label class="check-label">
+                <input id="taskSplittable" type="checkbox" onchange="toggleTaskSplitFields()">
+                允许拆分安排
+            </label>
+            <div id="taskSplitFields" class="form-grid hidden">
+                <label>最短分段（分钟）<input id="taskMinChunk" type="number" min="15" max="480" step="15" value="30"></label>
+                <label>最长分段（分钟）<input id="taskMaxChunk" type="number" min="15" max="720" step="15" value="120"></label>
+            </div>
+            <label>
+                前置任务
+                <select id="taskDependencyIds" multiple size="4"></select>
+            </label>
+        </div>
 
 
         <label>

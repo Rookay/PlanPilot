@@ -10,7 +10,7 @@
 
 - ✅ Planning Engine 抽取到 `app/planning/engine.py`（generate / find_free_slots / check_conflicts / evaluate_plan）
 - ✅ 业务逻辑抽取到 `app/services/`（task / event / schedule）
-- ✅ Tool 骨架 + 28 个工具（`app/tools/`）
+- ✅ Tool 骨架 + 30 个工具（`app/tools/`）
 - ✅ Skill 系统（`app/skills/`，第一版为提示词档案）
 - ✅ Agent Loop / Context / Memory / Confirmation（`app/agent/`）
 - ✅ LLM Provider 抽象 + MockProvider + OpenAICompatibleProvider（`app/llm/`）
@@ -22,8 +22,46 @@
 - ✅ Open-Meteo 天气工具 + 网络失败降级
 - ✅ 地点搜索、地址解析、路线估算接口 + 高德地图适配器
 - ✅ 标准库自动化测试覆盖核心规划与 Agent 多步流程
+- ✅ 长任务拆分、任务依赖拓扑排序与循环依赖校验
+- ✅ 日程锁定、指定范围局部重排、计划版本 diff 与一键撤销
+- ✅ Agent 多工具确认批次的原子回滚与执行后计划审计
+- ✅ 日历拖动/缩放前的冲突与相邻地点通勤校验
 
 接入真实大模型见 [docs/llm-integration.md](./llm-integration.md)。
+
+---
+
+## 当前执行链路
+
+```text
+用户输入
+  -> Context Builder 提供最小必要上下文
+  -> LLM / Mock Provider 生成结构化工具调用
+  -> Agent Loop 按“读取、验证、规划、执行”记录轨迹
+  -> Confirmation 汇总有副作用的调用
+  -> AgentDatabaseSnapshot 建立执行前快照
+  -> Tool Registry 依次执行
+  -> 任一步失败：恢复快照
+  -> 全部成功：运行时间冲突与通勤约束审计
+  -> 返回自然语言结果、变更集和结构化执行轨迹
+```
+
+### 规划修改的安全边界
+
+1. `Planning Engine` 是纯计算模块，只接收任务、忙碌区间和偏好，不读写数据库。
+2. `schedule_service` 是计划修改的唯一业务入口，负责锁定规则、局部重排和版本记录。
+3. 每次修改保存修改前快照，并计算 added / removed / updated 三类 diff。
+4. 用户可撤销最近一个仍处于 active 状态的版本，恢复日程和任务状态。
+5. Agent 的确认批次可能跨多个 Service 事务，因此使用补偿事务保证批次级原子性。
+6. 修改完成后再次审计当前计划，避免工具组合产生时间或通勤冲突。
+
+### 局部重排约束
+
+- 已锁定日程和已确认日程作为忙碌区间保留。
+- 只处理与指定范围相交的可移动日程，并可选择是否纳入尚未安排的任务。
+- 相同任务的分段尽量原位更新，只有分段数量变化时才新增或删除记录。
+- 若原本已安排的任务无法重新放置，整次重排失败，不提交半成品。
+- 拖动单条日程时，仅验证受影响的前后相邻路段，避免被无关历史问题阻塞。
 
 ---
 

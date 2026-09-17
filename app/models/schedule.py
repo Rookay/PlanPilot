@@ -4,7 +4,7 @@
 # IDE     ：PyCharm 
 # Author  ：刘景涛
 # Date    ：2026/9/11 14:11
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 
 from app.database import Base
 from app.utils import utcnow
@@ -38,7 +38,11 @@ class Schedule(Base):
     )
 
     plan_batch_id = Column(String(32), nullable=True, index=True)
+    plan_version_id = Column(String(32), nullable=True, index=True)
     reason = Column(Text, nullable=True)
+    is_locked = Column(Boolean, nullable=False, default=False)
+    chunk_index = Column(Integer, nullable=False, default=1)
+    source = Column(String(20), nullable=False, default="auto")
 
     created_at = Column(
         DateTime,

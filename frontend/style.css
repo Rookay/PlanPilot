@@ -433,6 +433,22 @@ body {
     cursor: pointer;
 }
 
+.task-planning-options {
+    margin-top: 16px;
+    padding: 14px 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+}
+
+.task-planning-options .form-grid {
+    margin-top: 10px;
+    gap: 10px;
+}
+
+.task-planning-options select[multiple] {
+    min-height: 96px;
+}
+
 /* 必须显式覆盖背景色：.modal-buttons button 的优先级高于 .primary-button，
    否则主按钮会变成白底白字（文字不可见）。 */
 .modal-buttons .primary-button {
@@ -772,6 +788,37 @@ body {
 .tt-item:focus-visible {
     outline: 2px solid rgba(15, 118, 110, 0.42);
     outline-offset: 1px;
+}
+
+.tt-item.is-dragging {
+    opacity: 0.45;
+}
+
+.tt-item.tt-locked {
+    padding-right: 24px;
+    cursor: pointer;
+}
+
+.tt-item.tt-locked::after {
+    content: "锁";
+    position: absolute;
+    top: 3px;
+    right: 5px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.tt-resize-handle {
+    position: absolute;
+    right: 4px;
+    bottom: 2px;
+    left: 4px;
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(23, 32, 51, 0.24);
+    cursor: ns-resize;
+    touch-action: none;
 }
 
 .tt-item-title {
@@ -1685,6 +1732,63 @@ body {
     color: #14705f;
     font-size: 12px;
     font-weight: 700;
+}
+
+.schedule-locked {
+    border-left: 4px solid #59636f;
+}
+
+.plan-history-section {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+}
+
+.plan-history-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.plan-history-heading h3 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.plan-version-list {
+    margin-top: 8px;
+}
+
+.plan-version-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 13px 0;
+    border-bottom: 1px solid #edf1f4;
+}
+
+.plan-version-row div,
+.plan-version-row span {
+    min-width: 0;
+}
+
+.plan-version-row div span {
+    display: block;
+    margin-top: 3px;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.plan-version-row > span {
+    color: var(--muted);
+    font-size: 12px;
+    text-align: right;
+}
+
+.plan-version-row.is-undone {
+    opacity: 0.58;
 }
 
 .agent-trace {

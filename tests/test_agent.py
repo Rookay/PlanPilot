@@ -98,3 +98,71 @@ class AgentLoopTests(TestCase):
 
         self.assertIn("已删除 3 个事件", completed.reply)
         self.assertEqual(event_service.list_events(self.db), [])
+
+    def test_confirmed_batch_rolls_back_when_a_later_tool_fails(self):
+        event = event_service.create_event(
+            self.db,
+            EventCreate(
+                title="不能只删一半",
+                start_time=datetime(2026, 9, 20, 5),
+                end_time=datetime(2026, 9, 20, 6),
+            ),
+        )
+        agent = Agent(
+            llm=MockProvider(),
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=PendingActionStore(),
+            skill_registry=build_default_skills(),
+        )
+        action_id = agent.confirmation_store.create(
+            tool_calls=[
+                {"name": "delete_event", "args": {"event_id": event.id}},
+                {"name": "delete_event", "args": {"event_id": 99999}},
+            ],
+            summary="测试原子执行",
+            session_id="rollback-session",
+        )
+
+        result = agent.handle(
+            self.db,
+            "",
+            "rollback-session",
+            confirm_action_id=action_id,
+            decision="accept",
+        )
+
+        self.assertIn("已恢复修改前状态", result.reply)
+        self.assertEqual(event_service.get_event(self.db, event.id).title, "不能只删一半")
+        self.assertEqual(result.applied_changes, [])
+
+    def test_offline_agent_can_request_latest_plan_undo(self):
+        task_service.create_task(
+            self.db,
+            TaskCreate(title="可撤销的安排", estimated_duration=60),
+        )
+        schedule_service.generate_schedules(
+            self.db,
+            ScheduleGenerateRequest(start=datetime(2026, 9, 18), days=2),
+        )
+        agent = Agent(
+            llm=MockProvider(),
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=PendingActionStore(),
+            skill_registry=build_default_skills(),
+        )
+
+        pending = agent.handle(self.db, "撤销刚才的计划", "undo-session")
+
+        self.assertTrue(pending.confirmation.required)
+        self.assertIn("撤销", pending.confirmation.summary)
+        completed = agent.handle(
+            self.db,
+            "",
+            "undo-session",
+            confirm_action_id=pending.confirmation.action_id,
+            decision="accept",
+        )
+        self.assertIn("已撤销计划版本", completed.reply)
+        self.assertEqual(schedule_service.list_schedules(self.db), [])

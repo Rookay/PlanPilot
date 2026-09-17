@@ -47,6 +47,9 @@ const state = {
   itineraryInfoWindow: null,
   calendarDetailMap: null,
   calendarDetailEdit: null,
+  planVersions: [],
+  calendarDrag: null,
+  suppressCalendarClickUntil: 0,
   mapClientConfig: null,
   mapLoadPromise: null,
   lastPlanBatchId: null,
@@ -247,6 +250,7 @@ function showPage(pageName) {
       .then(() => {
         if (pageName === "planning") {
           renderSchedule(null);
+          loadPlanVersions().catch(handleError);
         }
       })
       .catch(handleError);
@@ -406,6 +410,15 @@ function renderTaskItem(task) {
   if (task.category) {
     meta.push(`分类：${task.category}`);
   }
+  if (task.splittable) {
+    meta.push(`可拆分：${task.min_chunk_minutes}–${task.max_chunk_minutes} 分钟`);
+  }
+  if (task.dependency_ids?.length) {
+    const dependencyNames = task.dependency_ids
+      .map((id) => state.tasks.find((item) => item.id === id)?.title || `#${id}`)
+      .join("、");
+    meta.push(`前置：${dependencyNames}`);
+  }
   const taskLocation = locationById(task.location_id);
   if (taskLocation || task.location) {
     meta.push(`地点：${taskLocation?.label || task.location}`);
@@ -501,6 +514,12 @@ async function submitTask() {
     alert("持续时间必须是大于 0 的数字");
     return;
   }
+  const minChunk = Number($("taskMinChunk").value) || 30;
+  const maxChunk = Number($("taskMaxChunk").value) || 120;
+  if (minChunk > maxChunk) {
+    alert("最短分段不能大于最长分段");
+    return;
+  }
 
   const startValue = $("taskStartTime").value;
   const earliestValue = $("taskEarliestStart").value;
@@ -515,6 +534,12 @@ async function submitTask() {
     title,
     description: $("taskDescription").value.trim() || null,
     estimated_duration: duration,
+    splittable: $("taskSplittable").checked,
+    min_chunk_minutes: minChunk,
+    max_chunk_minutes: maxChunk,
+    dependency_ids: Array.from($("taskDependencyIds").selectedOptions).map(
+      (option) => Number(option.value),
+    ),
     priority: $("taskPriority").value,
     start_time: startValue ? new Date(startValue).toISOString() : null,
     earliest_start: earliestValue ? new Date(earliestValue).toISOString() : null,
@@ -618,6 +643,11 @@ function openTaskModal(id = null) {
       $("taskEarliestStart").value = toDateTimeLocalValue(task.earliest_start);
       $("taskDeadline").value = toDateTimeLocalValue(task.deadline);
       $("taskDuration").value = task.estimated_duration;
+      $("taskSplittable").checked = Boolean(task.splittable);
+      $("taskMinChunk").value = task.min_chunk_minutes || 30;
+      $("taskMaxChunk").value = task.max_chunk_minutes || 120;
+      populateTaskDependencyOptions(task.dependency_ids || [], task.id);
+      toggleTaskSplitFields();
       $("taskPriority").value = task.priority;
       $("taskPreferredTime").value = task.preferred_time || "";
       $("taskCategory").value = task.category || "";
@@ -645,10 +675,33 @@ function clearTaskForm() {
   $("taskEarliestStart").value = "";
   $("taskDeadline").value = "";
   $("taskDuration").value = state.preferences?.default_task_duration_min || 60;
+  $("taskSplittable").checked = false;
+  $("taskMinChunk").value = 30;
+  $("taskMaxChunk").value = 120;
+  populateTaskDependencyOptions();
+  toggleTaskSplitFields();
   $("taskPriority").value = "medium";
   $("taskPreferredTime").value = "";
   $("taskCategory").value = "";
   clearModalLocation("task");
+}
+
+function toggleTaskSplitFields() {
+  $("taskSplitFields")?.classList.toggle("hidden", !$("taskSplittable")?.checked);
+}
+
+function populateTaskDependencyOptions(selectedIds = [], currentTaskId = null) {
+  const select = $("taskDependencyIds");
+  if (!select) {
+    return;
+  }
+  const selected = new Set(selectedIds.map(Number));
+  select.innerHTML = state.tasks
+    .filter((task) => task.id !== currentTaskId && task.status !== "cancelled")
+    .map(
+      (task) => `<option value="${task.id}" ${selected.has(task.id) ? "selected" : ""}>${escapeHtml(task.title)}</option>`,
+    )
+    .join("");
 }
 
 
@@ -1351,11 +1404,12 @@ function renderScheduleItem(schedule) {
     : "";
 
   return `
-    <div class="schedule ${accepted ? "schedule-accepted" : ""}">
+    <div class="schedule ${accepted ? "schedule-accepted" : ""} ${schedule.is_locked ? "schedule-locked" : ""}">
       <div class="schedule-time">${escapeHtml(timeText)}</div>
       <div class="schedule-title"><span class="kind-badge flexible-kind">可调整</span>${escapeHtml(title)}${reason}</div>
       ${actionable ? `<div class="schedule-actions">
         ${proposed ? `<button class="ghost-button" onclick="acceptSchedule(${schedule.id})">确认</button>` : `<span class="schedule-status">${accepted ? "已确认" : escapeHtml(schedule.status)}</span>`}
+        <button class="ghost-button" onclick="toggleScheduleLock(${schedule.id})">${schedule.is_locked ? "解锁" : "锁定"}</button>
         <button class="delete-button" onclick="deleteSchedule(${schedule.id})">
           移除
         </button>
@@ -1414,6 +1468,94 @@ async function clearSchedules() {
   } catch (error) {
     alert(`清空失败：${error.message}`);
   }
+}
+
+async function toggleScheduleLock(id) {
+  const schedule = state.schedules.find((item) => item.id === id);
+  if (!schedule) {
+    return;
+  }
+  try {
+    await api(`/schedules/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ is_locked: !schedule.is_locked }),
+    });
+    await loadAllData();
+    renderSchedule(null);
+    loadPlanVersions().catch(handleError);
+  } catch (error) {
+    alert(`操作失败：${error.message}`);
+  }
+}
+
+async function replanCurrentWeek() {
+  const start = state.weekStart || startOfWeek(new Date());
+  const end = addDays(start, 7);
+  const payload = {
+    start: start.toISOString(),
+    end: end.toISOString(),
+    include_unscheduled: true,
+  };
+  try {
+    const preview = await api("/schedules/replan-local/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const summary = `将保留 ${preview.kept_locked} 条锁定日程，重排 ${preview.removed.length} 条安排，并生成 ${preview.proposed.length} 个时间块。确认继续吗？`;
+    if (!confirm(summary)) {
+      return;
+    }
+    await api("/schedules/replan-local", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await loadAllData();
+    renderSchedule(null);
+    await loadPlanVersions();
+  } catch (error) {
+    alert(`局部重排失败：${error.message}`);
+  }
+}
+
+async function undoLatestPlan() {
+  if (!confirm("确定撤销最近一次日程修改吗？")) {
+    return;
+  }
+  try {
+    await api("/schedules/versions/undo-latest", { method: "POST" });
+    await loadAllData();
+    renderSchedule(null);
+    await loadPlanVersions();
+  } catch (error) {
+    alert(`撤销失败：${error.message}`);
+  }
+}
+
+async function loadPlanVersions() {
+  const container = $("planVersionList");
+  if (!container) {
+    return;
+  }
+  state.planVersions = await api("/schedules/versions?limit=12");
+  if (!state.planVersions.length) {
+    container.innerHTML = '<div class="empty">还没有计划版本</div>';
+    return;
+  }
+  container.innerHTML = state.planVersions.map((version) => {
+    const createdAt = parseDate(version.created_at);
+    const added = version.changes.filter((item) => item.type === "added").length;
+    const removed = version.changes.filter((item) => item.type === "removed").length;
+    const updated = version.changes.filter((item) => item.type === "updated").length;
+    return `
+      <div class="plan-version-row ${version.status === "undone" ? "is-undone" : ""}">
+        <div>
+          <strong>${escapeHtml(version.summary)}</strong>
+          <span>${createdAt ? escapeHtml(formatDateTime(createdAt.toISOString())) : ""}</span>
+        </div>
+        <span>新增 ${added} · 移除 ${removed} · 修改 ${updated}${version.status === "undone" ? " · 已撤销" : ""}</span>
+      </div>
+    `;
+  }).join("");
 }
 
 
@@ -1478,7 +1620,9 @@ function renderTimetable(host) {
         .join("");
 
       return `
-        <div class="tt-col ${isSameDay(day, today) ? "tt-today" : ""}">
+        <div class="tt-col ${isSameDay(day, today) ? "tt-today" : ""}"
+             ondragover="allowTimetableDrop(event)"
+             ondrop="dropTimetableSchedule(event, '${localDateInputValue(day)}')">
           ${hourCells}
           ${items}
         </div>
@@ -1505,7 +1649,7 @@ function collectDayItems(day, dayEnd) {
   const windowStartMs = dayStartMs + TIMETABLE_START_HOUR * 3600000;
   const windowEndMs = dayStartMs + TIMETABLE_END_HOUR * 3600000;
 
-  const push = (start, end, className, label, detailKind, detailId) => {
+  const push = (start, end, className, label, detailKind, detailId, options = {}) => {
     if (!start || !end) {
       return;
     }
@@ -1527,6 +1671,7 @@ function collectDayItems(day, dayEnd) {
       timeText: formatTime(start),
       detailKind,
       detailId,
+      ...options,
     });
   };
 
@@ -1556,7 +1701,9 @@ function collectDayItems(day, dayEnd) {
         schedule.status === "accepted"
           ? "tt-schedule tt-accepted"
           : "tt-schedule";
-      push(start, end, className, title, "schedule", schedule.id);
+      push(start, end, className, title, "schedule", schedule.id, {
+        locked: Boolean(schedule.is_locked),
+      });
     }
     });
 
@@ -1579,25 +1726,169 @@ function collectDayItems(day, dayEnd) {
 }
 
 function renderTimetableItem(item) {
+  const draggable = item.detailKind === "schedule" && !item.locked;
   return `
     <div
-      class="tt-item ${item.className}"
+      class="tt-item ${item.className} ${item.locked ? "tt-locked" : ""}"
       style="top:${item.top}px;height:${item.height}px"
       title="${escapeHtml(item.label)}"
       role="button"
       tabindex="0"
-      onclick="openCalendarItemDetails('${item.detailKind}', ${item.detailId})"
+      draggable="${draggable}"
+      ${draggable ? `ondragstart="startTimetableDrag(event, ${item.detailId})" ondragend="finishTimetableDrag(event)"` : ""}
+      onclick="handleCalendarItemClick('${item.detailKind}', ${item.detailId})"
       onkeydown="handleCalendarItemKey(event, '${item.detailKind}', ${item.detailId})">
       <div class="tt-item-title">${escapeHtml(item.label)}</div>
       <div class="tt-item-time">${escapeHtml(item.timeText)}</div>
+      ${draggable ? `<span class="tt-resize-handle" draggable="false" title="调整时长" ondragstart="event.preventDefault()" onpointerdown="startScheduleResize(event, ${item.detailId})"></span>` : ""}
     </div>
   `;
+}
+
+function handleCalendarItemClick(kind, id) {
+  if (Date.now() < state.suppressCalendarClickUntil) {
+    return;
+  }
+  openCalendarItemDetails(kind, id);
 }
 
 function handleCalendarItemKey(event, kind, id) {
   if (event.key === "Enter" || event.key === " ") {
     event.preventDefault();
     openCalendarItemDetails(kind, id);
+  }
+}
+
+function startTimetableDrag(event, scheduleId) {
+  const schedule = state.schedules.find((item) => item.id === scheduleId);
+  if (!schedule || schedule.is_locked) {
+    event.preventDefault();
+    return;
+  }
+  state.calendarDrag = { type: "move", scheduleId };
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", String(scheduleId));
+  event.currentTarget.classList.add("is-dragging");
+}
+
+function finishTimetableDrag(event) {
+  event.currentTarget.classList.remove("is-dragging");
+  state.suppressCalendarClickUntil = Date.now() + 500;
+}
+
+function allowTimetableDrop(event) {
+  if (state.calendarDrag?.type === "move") {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+}
+
+function dropTimetableSchedule(event, dayValue) {
+  event.preventDefault();
+  const scheduleId = Number(event.dataTransfer.getData("text/plain"));
+  const schedule = state.schedules.find((item) => item.id === scheduleId);
+  if (!schedule || schedule.is_locked) {
+    return;
+  }
+  const rect = event.currentTarget.getBoundingClientRect();
+  const durationMinutes = Math.max(
+    15,
+    Math.round((parseDate(schedule.end_time) - parseDate(schedule.start_time)) / 60000),
+  );
+  const visibleMinutes = (event.clientY - rect.top) / HOUR_HEIGHT * 60;
+  const roundedMinutes = Math.round(visibleMinutes / 15) * 15;
+  const minuteOfDay = Math.max(
+    TIMETABLE_START_HOUR * 60,
+    Math.min(TIMETABLE_END_HOUR * 60 - durationMinutes, TIMETABLE_START_HOUR * 60 + roundedMinutes),
+  );
+  const nextStart = new Date(`${dayValue}T00:00:00`);
+  nextStart.setMinutes(minuteOfDay);
+  const nextEnd = new Date(nextStart.getTime() + durationMinutes * 60000);
+  state.calendarDrag = null;
+  state.suppressCalendarClickUntil = Date.now() + 500;
+  moveScheduleFromCalendar(scheduleId, nextStart, nextEnd);
+}
+
+function startScheduleResize(event, scheduleId) {
+  event.preventDefault();
+  event.stopPropagation();
+  const schedule = state.schedules.find((item) => item.id === scheduleId);
+  if (!schedule || schedule.is_locked) {
+    return;
+  }
+  const item = event.currentTarget.closest(".tt-item");
+  state.calendarDrag = {
+    type: "resize",
+    scheduleId,
+    startY: event.clientY,
+    originalHeight: item.getBoundingClientRect().height,
+    element: item,
+  };
+  state.suppressCalendarClickUntil = Date.now() + 800;
+}
+
+function handleScheduleResizeMove(event) {
+  const drag = state.calendarDrag;
+  if (!drag || drag.type !== "resize") {
+    return;
+  }
+  const delta = event.clientY - drag.startY;
+  const nextHeight = Math.max(20, drag.originalHeight + delta);
+  drag.element.style.height = `${nextHeight}px`;
+}
+
+function finishScheduleResize(event) {
+  const drag = state.calendarDrag;
+  if (!drag || drag.type !== "resize") {
+    return;
+  }
+  const schedule = state.schedules.find((item) => item.id === drag.scheduleId);
+  const deltaMinutes = Math.round(
+    ((event.clientY - drag.startY) / HOUR_HEIGHT * 60) / 15,
+  ) * 15;
+  state.calendarDrag = null;
+  state.suppressCalendarClickUntil = Date.now() + 500;
+  if (!schedule || deltaMinutes === 0) {
+    renderTimetables();
+    return;
+  }
+  const start = parseDate(schedule.start_time);
+  const originalEnd = parseDate(schedule.end_time);
+  const end = new Date(Math.max(start.getTime() + 15 * 60000, originalEnd.getTime() + deltaMinutes * 60000));
+  moveScheduleFromCalendar(schedule.id, start, end);
+}
+
+async function moveScheduleFromCalendar(scheduleId, start, end) {
+  const payload = {
+    start_time: start.toISOString(),
+    end_time: end.toISOString(),
+  };
+  try {
+    const preview = await api(`/schedules/${scheduleId}/move-preview`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!preview.valid) {
+      alert(`无法调整：${preview.conflicts.join("；")}`);
+      renderTimetables();
+      return;
+    }
+    if (preview.warnings.length && !confirm(`${preview.warnings.join("；")}。仍要保存吗？`)) {
+      renderTimetables();
+      return;
+    }
+    await api(`/schedules/${scheduleId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    await loadAllData();
+    if (!$('planning')?.classList.contains('hidden')) {
+      renderSchedule(null);
+      loadPlanVersions().catch(handleError);
+    }
+  } catch (error) {
+    alert(`调整失败：${error.message}`);
+    renderTimetables();
   }
 }
 
@@ -1714,6 +2005,8 @@ function buildCalendarItemDetail(kind, id) {
         ["时间", calendarTimeRange(start, end)],
         ["时长", calendarDurationText(start, end)],
         ["优先级", task ? getPriorityName(task.priority) : "未设置"],
+        ["锁定", schedule.is_locked ? "已锁定" : "未锁定"],
+        ["分段", schedule.chunk_index > 1 ? `第 ${schedule.chunk_index} 段` : "单段"],
       ],
       locationText: location?.label || "",
       locations: [location].filter(Boolean),
@@ -2513,10 +2806,12 @@ function renderAgentTrace(data) {
     trace?.classList.add("hidden");
     return;
   }
-  const rows = calls.map((call) => `
+  const workflow = data.workflow_steps || [];
+  const traceItems = workflow.length ? workflow : calls;
+  const rows = traceItems.map((call) => `
     <div class="trace-row">
-      <span class="trace-state ${call.success ? "ok" : "failed"}">${call.success ? "完成" : "失败"}</span>
-      <strong>${escapeHtml(call.name)}</strong>
+      <span class="trace-state ${(call.success ?? call.status !== "failed") ? "ok" : "failed"}">${escapeHtml(call.stage || ((call.success ?? call.status !== "failed") ? "完成" : "失败"))}</span>
+      <strong>${escapeHtml(call.name || "")}</strong>
       <span>${escapeHtml(call.summary || "")}</span>
     </div>
   `);
@@ -2682,6 +2977,8 @@ function init() {
       closeCalendarItemDetails();
     }
   });
+  document.addEventListener("pointermove", handleScheduleResizeMove);
+  document.addEventListener("pointerup", finishScheduleResize);
 }
 
 if (document.readyState === "loading") {
