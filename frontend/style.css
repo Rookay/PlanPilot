@@ -1664,6 +1664,12 @@ body {
     color: #8a5a09;
 }
 
+.compact-button {
+    min-height: 30px;
+    padding: 5px 9px;
+    font-size: 12px;
+}
+
 .plan-analysis {
     display: flex;
     align-items: flex-start;

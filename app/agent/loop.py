@@ -42,7 +42,7 @@ class AgentResult:
 class AgentLoop:
     MAX_ITERATIONS = 12
     MAX_TOOL_CALLS = 24
-    FALLBACK_COOLDOWN_SECONDS = 60
+    FALLBACK_COOLDOWN_SECONDS = 15
 
     def __init__(
         self,
@@ -80,9 +80,10 @@ class AgentLoop:
                     else self.llm
                 )
                 response = provider.chat(messages, tools=self.registry.schemas())
+                if provider is self.llm:
+                    self.mark_provider_available()
             except Exception as exc:  # noqa: BLE001
-                self.last_provider_error = str(exc)
-                self.fallback_until = time.monotonic() + self.FALLBACK_COOLDOWN_SECONDS
+                self.mark_provider_unavailable(exc)
                 messages.append(
                     {
                         "role": "system",
@@ -263,6 +264,21 @@ class AgentLoop:
             applied_changes=applied_changes,
             proposed_schedules=proposed_schedules,
         )
+
+    def replace_provider(self, provider: LLMProvider) -> None:
+        self.llm = provider
+        self.mark_provider_available()
+
+    def mark_provider_available(self) -> None:
+        self.fallback_until = 0.0
+        self.last_provider_error = None
+
+    def mark_provider_unavailable(self, error: Exception | str) -> None:
+        self.last_provider_error = str(error)
+        self.fallback_until = time.monotonic() + self.FALLBACK_COOLDOWN_SECONDS
+
+    def retry_after_seconds(self) -> int:
+        return max(0, int(self.fallback_until - time.monotonic() + 0.999))
 
     # ------------------------------------------------------------------
 

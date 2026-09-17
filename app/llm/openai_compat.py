@@ -13,6 +13,7 @@
 """
 
 import json
+import os
 import urllib.error
 import urllib.request
 from typing import Optional
@@ -96,13 +97,41 @@ class OpenAICompatibleProvider(LLMProvider):
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+            return self._read_response(urllib.request.urlopen, request)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LLM 请求失败 {exc.code}: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM 连接失败: {exc.reason}") from exc
+            raise self._http_error(exc) from exc
+        except urllib.error.URLError as proxy_error:
+            if not _has_environment_proxy():
+                raise RuntimeError(f"LLM 连接失败: {proxy_error.reason}") from proxy_error
+
+            # 某些启动环境会注入已经失效的代理。代理连接失败时再直连一次，
+            # 既不影响正常代理，也避免模型永久降级成本地规则。
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            try:
+                return self._read_response(opener.open, request)
+            except urllib.error.HTTPError as exc:
+                raise self._http_error(exc) from exc
+            except urllib.error.URLError as direct_error:
+                raise RuntimeError(
+                    "LLM 连接失败：环境代理不可用，直连也失败："
+                    f"{direct_error.reason}"
+                ) from direct_error
+
+    def _read_response(self, open_request, request: urllib.request.Request) -> dict:
+        with open_request(request, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    @staticmethod
+    def _http_error(exc: urllib.error.HTTPError) -> RuntimeError:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return RuntimeError(f"LLM 请求失败 {exc.code}: {detail}")
+
+
+def _has_environment_proxy() -> bool:
+    return any(
+        os.getenv(name)
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+    )
 
 
 def from_config() -> OpenAICompatibleProvider | None:

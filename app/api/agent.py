@@ -10,7 +10,7 @@ from typing import List
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.agent.factory import agent
+from app.agent.factory import agent, reconnect_agent
 from app.database import get_db
 from app.models.chat import ChatMessage
 from app.schemas.agent import (
@@ -36,9 +36,15 @@ def agent_status():
         "model": getattr(provider, "model", None),
         "fallback_active": time.monotonic() < agent.loop.fallback_until,
         "last_error": agent.loop.last_provider_error,
+        "retry_after_seconds": agent.loop.retry_after_seconds(),
         "max_iterations": agent.loop.MAX_ITERATIONS,
         "max_tool_calls": agent.loop.MAX_TOOL_CALLS,
     }
+
+
+@router.post("/reconnect")
+def reconnect_model():
+    return reconnect_agent()
 
 
 @router.get("/sessions/{session_id}/messages", response_model=List[ChatMessageResponse])

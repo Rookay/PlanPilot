@@ -2787,14 +2787,49 @@ async function loadChatHistory() {
 async function loadAgentStatus() {
   const status = await api("/agent/status");
   const badge = $("agentStatus");
+  const reconnectButton = $("agentReconnectButton");
   if (!badge) {
     return;
   }
-  const local = status.mode === "local" || status.fallback_active;
-  badge.textContent = local
-    ? "本地规则模式"
+  const disconnected = status.mode === "local" || status.fallback_active || Boolean(status.last_error);
+  badge.textContent = disconnected
+    ? status.retry_after_seconds > 0
+      ? `连接异常 · ${status.retry_after_seconds} 秒后自动重试`
+      : "连接异常 · 可重新连接"
     : `大模型 · ${status.model || "已连接"}`;
-  badge.className = `status-badge ${local ? "status-local" : "status-online"}`;
+  badge.title = status.last_error || "大模型连接正常";
+  badge.className = `status-badge ${disconnected ? "status-local" : "status-online"}`;
+  reconnectButton?.classList.toggle("hidden", !disconnected);
+}
+
+async function reconnectAgent() {
+  const button = $("agentReconnectButton");
+  const badge = $("agentStatus");
+  if (button?.disabled) {
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = "连接中";
+  }
+  if (badge) {
+    badge.textContent = "正在重新连接";
+  }
+  try {
+    const result = await api("/agent/reconnect", { method: "POST" });
+    await loadAgentStatus();
+    if (!result.connected) {
+      alert(`重连失败：${result.error}`);
+    }
+  } catch (error) {
+    alert(`重连失败：${error.message}`);
+    await loadAgentStatus().catch(handleError);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "重新连接";
+    }
+  }
 }
 
 function renderAgentTrace(data) {
@@ -2979,6 +3014,7 @@ function init() {
   });
   document.addEventListener("pointermove", handleScheduleResizeMove);
   document.addEventListener("pointerup", finishScheduleResize);
+  window.setInterval(() => loadAgentStatus().catch(handleError), 5000);
 }
 
 if (document.readyState === "loading") {
