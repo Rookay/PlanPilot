@@ -8,7 +8,7 @@
 """
 
 from datetime import datetime
-from typing import List
+from typing import List, Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from app.schemas.schedule import (
     LocalReplanRequest,
     PlanVersionResponse,
     PlanRiskReport,
+    PlanAlternativesResponse,
     ScheduleMovePreview,
     ScheduleResponse,
     ScheduleUpdate,
@@ -51,6 +52,23 @@ def preview_schedules(
     db: Session = Depends(get_db),
 ):
     return schedule_service.preview_plan(db, payload)
+
+
+@router.post("/alternatives", response_model=PlanAlternativesResponse)
+def preview_alternatives(
+    payload: ScheduleGenerateRequest,
+    db: Session = Depends(get_db),
+):
+    return schedule_service.generate_plan_alternatives(db, payload)
+
+
+@router.post("/alternatives/{profile}/apply", response_model=ScheduleGenerateResponse)
+def apply_alternative(
+    profile: Literal["deadline", "balanced", "focus"],
+    payload: ScheduleGenerateRequest,
+    db: Session = Depends(get_db),
+):
+    return schedule_service.apply_plan_alternative(db, payload, profile)
 
 
 @router.post("/accept-all")

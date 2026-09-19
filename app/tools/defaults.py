@@ -22,7 +22,9 @@ from app.tools.map_tools import (
 )
 from app.tools.planning_tools import (
     AnalyzePlanRisksTool,
+    ApplyPlanAlternativeTool,
     CheckConflictsTool,
+    ComparePlanAlternativesTool,
     EvaluatePlanTool,
     GeneratePlanTool,
     LocalReplanTool,
@@ -77,6 +79,8 @@ def build_default_registry() -> ToolRegistry:
         DeleteScheduleTool(),
         # Planning
         GeneratePlanTool(),
+        ComparePlanAlternativesTool(),
+        ApplyPlanAlternativeTool(),
         AnalyzePlanRisksTool(),
         CheckConflictsTool(),
         EvaluatePlanTool(),

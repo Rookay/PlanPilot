@@ -60,6 +60,8 @@ const state = {
   evaluationsLoaded: false,
   planningScope: "week",
   pendingReplan: null,
+  planAlternatives: null,
+  planAlternativesRequest: null,
 };
 
 state.chatSessionId =
@@ -576,9 +578,9 @@ async function submitTask() {
     splittable: $("taskSplittable").checked,
     min_chunk_minutes: minChunk,
     max_chunk_minutes: maxChunk,
-    dependency_ids: Array.from($("taskDependencyIds").selectedOptions).map(
-      (option) => Number(option.value),
-    ),
+    dependency_ids: Array.from(
+      document.querySelectorAll("#taskDependencyOptions input:checked"),
+    ).map((input) => Number(input.value)),
     priority: $("taskPriority").value,
     start_time: startValue ? new Date(startValue).toISOString() : null,
     earliest_start: earliestValue ? new Date(earliestValue).toISOString() : null,
@@ -755,17 +757,52 @@ function toggleTaskSplitFields() {
 }
 
 function populateTaskDependencyOptions(selectedIds = [], currentTaskId = null) {
-  const select = $("taskDependencyIds");
-  if (!select) {
+  const container = $("taskDependencyOptions");
+  const noneOption = $("taskDependencyNone");
+  if (!container || !noneOption) {
     return;
   }
   const selected = new Set(selectedIds.map(Number));
-  select.innerHTML = state.tasks
-    .filter((task) => task.id !== currentTaskId && task.status !== "cancelled")
+  const candidates = state.tasks.filter(
+    (task) =>
+      task.id !== currentTaskId &&
+      task.status !== "cancelled" &&
+      (task.status !== "completed" || selected.has(task.id)),
+  );
+  noneOption.checked = selected.size === 0;
+  container.innerHTML = candidates
     .map(
-      (task) => `<option value="${task.id}" ${selected.has(task.id) ? "selected" : ""}>${escapeHtml(task.title)}</option>`,
+      (task) => `
+        <label class="task-dependency-option">
+          <input type="checkbox" value="${task.id}" ${selected.has(task.id) ? "checked" : ""} onchange="syncTaskDependencyNone()">
+          <span>${escapeHtml(task.title)}</span>
+          <small>${task.status === "completed" ? "已完成" : `${escapeHtml(getPriorityName(task.priority))}优先级`}</small>
+        </label>
+      `,
     )
     .join("");
+  if (!candidates.length) {
+    container.innerHTML = '<div class="task-dependency-empty">暂无其他待完成任务</div>';
+  }
+}
+
+function clearTaskDependencies() {
+  if (!$("taskDependencyNone")?.checked) {
+    syncTaskDependencyNone();
+    return;
+  }
+  document
+    .querySelectorAll("#taskDependencyOptions input:checked")
+    .forEach((input) => { input.checked = false; });
+}
+
+function syncTaskDependencyNone() {
+  const hasSelected = Boolean(
+    document.querySelector("#taskDependencyOptions input:checked"),
+  );
+  if ($("taskDependencyNone")) {
+    $("taskDependencyNone").checked = !hasSelected;
+  }
 }
 
 
@@ -1412,6 +1449,7 @@ function setPlanningScope(scope) {
     button?.classList.toggle("active", name === scope);
   }
   closePlanComparison();
+  closePlanAlternatives();
   renderPlanningOverview();
 }
 
@@ -1444,6 +1482,7 @@ function setPlanningMode(mode) {
   if ($("planModeHint")) {
     $("planModeHint").textContent = labels[mode] || labels.auto;
   }
+  closePlanAlternatives();
 }
 
 function markPlanningScopeCustom() {
@@ -1454,6 +1493,7 @@ function markPlanningScopeCustom() {
       button?.classList.toggle("active", name === "custom");
     }
   }
+  closePlanAlternatives();
   renderPlanningOverview();
 }
 
@@ -1556,6 +1596,133 @@ async function previewSchedule() {
   } catch (error) {
     renderPlanAnalysis({ score: 0, issues: [error.message] }, "预览失败");
   }
+}
+
+async function loadPlanAlternatives() {
+  const panel = $("planAlternatives");
+  const grid = $("planAlternativesGrid");
+  panel.classList.remove("hidden");
+  grid.innerHTML = '<div class="empty">正在生成三套可行方案...</div>';
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  try {
+    const payload = collectPlanPayload();
+    const result = await api("/schedules/alternatives", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.planAlternatives = result;
+    state.planAlternativesRequest = payload;
+    renderPlanAlternatives(result);
+  } catch (error) {
+    state.planAlternatives = null;
+    state.planAlternativesRequest = null;
+    grid.innerHTML = `<div class="empty error">方案生成失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function renderPlanAlternatives(result) {
+  const alternatives = result.alternatives || [];
+  $("planAlternativesGrid").innerHTML = alternatives.map((alternative) => {
+    const metrics = alternative.metrics || {};
+    const schedules = alternative.schedules || [];
+    const timeline = schedules.slice(0, 6).map((item) => {
+      const task = state.tasks.find((candidate) => candidate.id === item.task_id);
+      const taskMeta = task
+        ? [
+            `优先级：${getPriorityName(task.priority)}`,
+            task.deadline ? `截止：${formatDateTime(task.deadline)}` : "无截止时间",
+          ].join(" · ")
+        : "";
+      return `<li><span>${escapeHtml(planComparisonTime(item))}</span><div><strong>${escapeHtml(task?.title || `任务 #${item.task_id}`)}</strong><small>${escapeHtml(taskMeta)}</small></div></li>`;
+    }).join("");
+    const remaining = Math.max(0, schedules.length - 6);
+    const strengths = (alternative.strengths || []).slice(0, 3);
+    const tradeoffs = (alternative.tradeoffs || []).slice(0, 2);
+    const unscheduled = (alternative.unscheduled || []).map(
+      (item) => `<li><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.reason)}</span></li>`,
+    ).join("");
+    return `
+      <article class="plan-alternative ${alternative.recommended ? "recommended" : ""}">
+        <div class="plan-alternative-head">
+          <div><h4>${escapeHtml(alternative.title)}</h4><p>${escapeHtml(alternative.summary)}</p></div>
+          ${alternative.recommended ? '<span class="recommended-badge">推荐</span>' : ""}
+        </div>
+        <div class="plan-alternative-outcomes">${(alternative.outcome_labels || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+        <dl class="plan-alternative-policy">
+          <div><dt>优先规则</dt><dd>${escapeHtml(alternative.selection_policy || "")}</dd></div>
+          <div><dt>安排节奏</dt><dd>${escapeHtml(alternative.pace || "")}</dd></div>
+        </dl>
+        <div class="plan-alternative-metrics">
+          <div><strong>${escapeHtml(alternative.analysis?.score ?? 0)}</strong><span>计划评分</span></div>
+          <div><strong>${escapeHtml(metrics.scheduled_tasks || 0)}</strong><span>已安排任务</span></div>
+          <div><strong>${escapeHtml(formatMinutesCompact(metrics.max_daily_minutes || 0))}</strong><span>单日最高</span></div>
+          <div><strong>${escapeHtml(metrics.days_used || 0)}</strong><span>占用天数</span></div>
+          <div><strong>${escapeHtml(formatMinutesCompact(metrics.idle_minutes || 0))}</strong><span>任务间空档</span></div>
+          <div><strong>${escapeHtml(metrics.changed_blocks || 0)}</strong><span>变更时间块</span></div>
+        </div>
+        ${alternative.recommendation_reason ? `<p class="plan-alternative-reason"><strong>推荐依据</strong>${escapeHtml(alternative.recommendation_reason)}</p>` : ""}
+        <div class="plan-alternative-explanation">
+          <div><strong>优势</strong><ul>${strengths.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>
+          <div><strong>取舍</strong><ul>${tradeoffs.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>
+        </div>
+        <ol class="plan-alternative-timeline">${timeline}</ol>
+        ${remaining ? `<p class="plan-alternative-more">另有 ${remaining} 个时间块</p>` : ""}
+        ${unscheduled ? `<div class="plan-alternative-unscheduled"><strong>未安排</strong><ul>${unscheduled}</ul></div>` : ""}
+        <div class="plan-alternative-actions">
+          <button class="ghost-button" type="button" onclick="showAlternativeComparison('${alternative.profile}')">查看变更</button>
+          <button class="primary-button" type="button" onclick="applyPlanAlternative('${alternative.profile}')">应用此方案</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+}
+
+function formatMinutesCompact(minutes) {
+  if (minutes < 60) {
+    return `${minutes}分`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours}时${rest}分` : `${hours}小时`;
+}
+
+function showAlternativeComparison(profile) {
+  const alternative = state.planAlternatives?.alternatives?.find(
+    (item) => item.profile === profile,
+  );
+  if (alternative) {
+    renderPlanComparison(alternative.comparison, `${alternative.title} · 变更详情`);
+  }
+}
+
+async function applyPlanAlternative(profile) {
+  const alternative = state.planAlternatives?.alternatives?.find(
+    (item) => item.profile === profile,
+  );
+  if (!alternative || !confirm(`确定应用「${alternative.title}」吗？当前范围内未锁定的待确认安排将被替换。`)) {
+    return;
+  }
+  try {
+    const result = await api(`/schedules/alternatives/${profile}/apply`, {
+      method: "POST",
+      body: JSON.stringify(state.planAlternativesRequest || collectPlanPayload()),
+    });
+    state.lastPlanBatchId = result.batch_id || null;
+    await loadAllData();
+    renderSchedule(result);
+    renderPlanAnalysis(result.analysis, `已应用：${alternative.title}`);
+    closePlanAlternatives();
+    closePlanComparison();
+    loadPlanVersions().catch(handleError);
+  } catch (error) {
+    alert(`应用方案失败：${error.message}`);
+  }
+}
+
+function closePlanAlternatives() {
+  $("planAlternatives")?.classList.add("hidden");
+  state.planAlternatives = null;
+  state.planAlternativesRequest = null;
 }
 
 function renderPlanComparison(comparison, title, allowApply = false) {

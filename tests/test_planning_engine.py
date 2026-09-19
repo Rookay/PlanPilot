@@ -6,6 +6,84 @@ from app.planning.optimizer import generate_optimized_plan, is_cp_sat_available
 
 
 class PlanningEngineTests(TestCase):
+    def test_deadline_first_does_not_let_distant_low_priority_task_displace_medium(self):
+        if not is_cp_sat_available():
+            self.skipTest("OR-Tools is not installed")
+        start = datetime(2026, 9, 19, 9)
+        tasks = [
+            PlanTask(id=1, title="普通任务", priority="medium", estimated_duration=60),
+            PlanTask(
+                id=2,
+                title="远期低优先级任务",
+                priority="low",
+                estimated_duration=60,
+                deadline=start + timedelta(days=8),
+            ),
+        ]
+
+        quick = generate_plan(
+            start=start,
+            days=1,
+            tasks=tasks,
+            busy_intervals=[],
+            scheduled_task_ids=set(),
+            windows=[(start, start + timedelta(hours=1))],
+            strategy="deadline_first",
+        )
+        optimized = generate_optimized_plan(
+            start=start,
+            tasks=tasks,
+            busy_intervals=[],
+            scheduled_task_ids=set(),
+            completed_task_ids=set(),
+            dependency_completion_times={},
+            windows=[(start, start + timedelta(hours=1))],
+            gap_minutes=0,
+            strategy="deadline_first",
+        )
+
+        self.assertEqual(quick.assignments[0].task_id, 1)
+        self.assertEqual(optimized.assignments[0].task_id, 1)
+
+    def test_deadline_first_protects_genuinely_urgent_task(self):
+        if not is_cp_sat_available():
+            self.skipTest("OR-Tools is not installed")
+        start = datetime(2026, 9, 19, 9)
+        tasks = [
+            PlanTask(id=1, title="普通任务", priority="medium", estimated_duration=60),
+            PlanTask(
+                id=2,
+                title="明日截止任务",
+                priority="low",
+                estimated_duration=60,
+                deadline=start + timedelta(days=1),
+            ),
+        ]
+
+        quick = generate_plan(
+            start=start,
+            days=1,
+            tasks=tasks,
+            busy_intervals=[],
+            scheduled_task_ids=set(),
+            windows=[(start, start + timedelta(hours=1))],
+            strategy="deadline_first",
+        )
+        optimized = generate_optimized_plan(
+            start=start,
+            tasks=tasks,
+            busy_intervals=[],
+            scheduled_task_ids=set(),
+            completed_task_ids=set(),
+            dependency_completion_times={},
+            windows=[(start, start + timedelta(hours=1))],
+            gap_minutes=0,
+            strategy="deadline_first",
+        )
+
+        self.assertEqual(quick.assignments[0].task_id, 2)
+        self.assertEqual(optimized.assignments[0].task_id, 2)
+
     def test_cp_sat_finds_global_order_that_greedy_misses(self):
         if not is_cp_sat_available():
             self.skipTest("OR-Tools is not installed")

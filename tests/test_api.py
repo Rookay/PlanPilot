@@ -187,6 +187,37 @@ class ApiWorkflowTests(TestCase):
         self.assertEqual(deleted_schedules.json()["deleted"], 2)
         self.assertIsNotNone(task_service.get_task(self.db, task.id))
 
+    def test_plan_alternatives_preview_and_apply_endpoints(self):
+        for index in range(2):
+            self.client.post(
+                "/api/tasks",
+                json={"title": f"方案任务 {index + 1}", "estimated_duration": 60},
+            )
+        payload = {
+            "start": "2026-09-16T01:00:00Z",
+            "days": 1,
+            "gap_minutes": 15,
+        }
+
+        preview = self.client.post("/api/schedules/alternatives", json=payload)
+
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(len(preview.json()["alternatives"]), 3)
+        recommended = next(
+            item for item in preview.json()["alternatives"] if item["recommended"]
+        )
+        self.assertTrue(recommended["recommendation_reason"])
+        self.assertTrue(recommended["strengths"])
+        self.assertTrue(recommended["tradeoffs"])
+        self.assertEqual(self.client.get("/api/schedules").json(), [])
+
+        applied = self.client.post(
+            "/api/schedules/alternatives/balanced/apply",
+            json=payload,
+        )
+        self.assertEqual(applied.status_code, 200, applied.text)
+        self.assertEqual(len(applied.json()["schedules"]), 2)
+
     def test_plan_versions_lock_and_undo_work_through_api(self):
         task = self.client.post(
             "/api/tasks",

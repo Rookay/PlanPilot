@@ -398,7 +398,7 @@
 
                 <label>
                     规划策略
-                    <select id="planStrategy">
+                    <select id="planStrategy" onchange="closePlanAlternatives()">
                         <option value="">使用偏好设置</option>
                         <option value="balanced">均衡安排</option>
                         <option value="deadline_first">截止优先</option>
@@ -413,15 +413,15 @@
 
                 <label>
                     间隔（分钟）
-                    <input id="planGap" type="number" min="0" max="240" value="0">
+                    <input id="planGap" type="number" min="0" max="240" value="0" onchange="closePlanAlternatives()">
                 </label>
 
                 <button class="primary-button" onclick="generateSchedule()">
                     开始规划
                 </button>
 
-                <button class="ghost-button" onclick="previewSchedule()">
-                    对比方案
+                <button class="ghost-button" onclick="loadPlanAlternatives()">
+                    多方案对比
                 </button>
 
                 <button id="acceptAllButton" class="ghost-button" onclick="acceptAllSchedules()">
@@ -444,6 +444,13 @@
             <div id="planningTimetable" class="timetable-host"></div>
 
             <div id="planAnalysis" class="plan-analysis hidden"></div>
+            <section id="planAlternatives" class="plan-alternatives hidden">
+                <div class="plan-alternatives-header">
+                    <div><span>深度优化</span><h3>选择规划方案</h3></div>
+                    <button class="modal-close-button" type="button" aria-label="关闭多方案对比" onclick="closePlanAlternatives()">×</button>
+                </div>
+                <div id="planAlternativesGrid" class="plan-alternatives-grid"></div>
+            </section>
             <section id="planComparison" class="plan-comparison hidden">
                 <div class="plan-comparison-header">
                     <div><span>方案变更</span><h3 id="planComparisonTitle">规划方案对比</h3></div>
@@ -642,10 +649,15 @@
                 <label>最短分段（分钟）<input id="taskMinChunk" type="number" min="15" max="480" step="15" value="30"></label>
                 <label>最长分段（分钟）<input id="taskMaxChunk" type="number" min="15" max="720" step="15" value="120"></label>
             </div>
-            <label>
-                前置任务
-                <select id="taskDependencyIds" multiple size="4"></select>
-            </label>
+            <fieldset class="task-dependency-fieldset">
+                <legend>前置任务</legend>
+                <p>当前任务需要等待所选任务完成后才能开始</p>
+                <label class="task-dependency-option task-dependency-none">
+                    <input id="taskDependencyNone" type="checkbox" checked onchange="clearTaskDependencies()">
+                    <span>无前置任务</span>
+                </label>
+                <div id="taskDependencyOptions" class="task-dependency-options"></div>
+            </fieldset>
         </div>
 
 

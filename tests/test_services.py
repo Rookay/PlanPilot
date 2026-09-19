@@ -269,6 +269,63 @@ class ServiceTests(TestCase):
         else:
             self.assertTrue(analysis["fallback_reason"])
 
+    def test_plan_alternatives_are_preview_only_and_can_be_applied(self):
+        for index in range(3):
+            task_service.create_task(
+                self.db,
+                TaskCreate(
+                    title=f"待规划任务 {index + 1}",
+                    estimated_duration=60,
+                    priority="high" if index == 0 else "medium",
+                    deadline=datetime(2026, 9, 17, 10 + index),
+                ),
+            )
+        payload = ScheduleGenerateRequest(
+            start=datetime(2026, 9, 16, 1),
+            days=2,
+            gap_minutes=15,
+        )
+
+        alternatives = schedule_service.generate_plan_alternatives(self.db, payload)
+
+        self.assertEqual(
+            [item.profile for item in alternatives.alternatives],
+            ["deadline", "balanced", "focus"],
+        )
+        self.assertIn(
+            alternatives.recommended_profile,
+            {"deadline", "balanced", "focus"},
+        )
+        self.assertEqual(schedule_service.list_schedules(self.db), [])
+        self.assertTrue(all(item.schedules for item in alternatives.alternatives))
+        self.assertTrue(all(item.metrics.scheduled_tasks == 3 for item in alternatives.alternatives))
+        recommended = next(item for item in alternatives.alternatives if item.recommended)
+        self.assertTrue(recommended.recommendation_reason)
+        self.assertTrue(all(item.selection_policy for item in alternatives.alternatives))
+        self.assertTrue(all(item.pace for item in alternatives.alternatives))
+        self.assertTrue(all(item.outcome_labels for item in alternatives.alternatives))
+        self.assertTrue(all(item.strengths for item in alternatives.alternatives))
+        self.assertTrue(all(item.tradeoffs for item in alternatives.alternatives))
+        self.assertEqual(
+            sum(item.recommended for item in alternatives.alternatives),
+            1,
+        )
+        by_profile = {item.profile: item for item in alternatives.alternatives}
+        self.assertLessEqual(
+            by_profile["focus"].metrics.idle_minutes,
+            by_profile["balanced"].metrics.idle_minutes,
+        )
+
+        applied = schedule_service.apply_plan_alternative(
+            self.db,
+            payload,
+            "focus",
+        )
+
+        self.assertEqual(len(applied.schedules), 3)
+        self.assertTrue(applied.version_id)
+        self.assertEqual(len(schedule_service.list_schedules(self.db)), 3)
+
     def test_local_preferences_drive_utc_planning_and_lunch_break(self):
         preference_service.update_preferences(
             self.db,

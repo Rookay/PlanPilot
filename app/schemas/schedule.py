@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 ScheduleStatus = Literal["proposed", "accepted", "completed", "cancelled"]
 PlanningStrategy = Literal["balanced", "deadline_first", "priority_first"]
 PlanningMode = Literal["auto", "quick", "optimized"]
+PlanAlternativeProfile = Literal["deadline", "balanced", "focus"]
 
 
 class ScheduleBase(BaseModel):
@@ -103,6 +104,40 @@ class ScheduleGenerateResponse(BaseModel):
     analysis: PlanAnalysis
     batch_id: Optional[str] = None
     version_id: Optional[str] = None
+
+
+class PlanAlternativeMetrics(BaseModel):
+    scheduled_tasks: int = 0
+    unscheduled_tasks: int = 0
+    scheduled_minutes: int = 0
+    days_used: int = 0
+    max_daily_minutes: int = 0
+    idle_minutes: int = 0
+    changed_blocks: int = 0
+
+
+class PlanAlternative(BaseModel):
+    profile: PlanAlternativeProfile
+    title: str
+    summary: str
+    selection_policy: str
+    pace: str
+    outcome_labels: List[str] = Field(default_factory=list)
+    recommended: bool = False
+    strengths: List[str] = Field(default_factory=list)
+    tradeoffs: List[str] = Field(default_factory=list)
+    recommendation_reason: Optional[str] = None
+    schedules: List[dict] = Field(default_factory=list)
+    unscheduled: List[UnscheduledTask] = Field(default_factory=list)
+    analysis: PlanAnalysis
+    metrics: PlanAlternativeMetrics
+    comparison: dict = Field(default_factory=dict)
+
+
+class PlanAlternativesResponse(BaseModel):
+    alternatives: List[PlanAlternative]
+    recommended_profile: PlanAlternativeProfile
+    scope: Dict[str, datetime]
 
 
 class LocalReplanRequest(BaseModel):

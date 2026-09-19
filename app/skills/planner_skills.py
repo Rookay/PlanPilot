@@ -34,6 +34,25 @@ def build_default_skills() -> SkillRegistry:
                 priority=20,
             ),
             Skill(
+                name="plan_alternatives",
+                description="生成并比较多套任务排期方案",
+                keywords=["几套方案", "多个方案", "多套方案", "方案对比", "不同方案"],
+                system_hint=(
+                    "【多方案规划】先确定规划范围，再调用 compare_plan_alternatives。"
+                    "解释截止优先、均衡节奏和集中处理的指标与取舍，不要替用户应用。"
+                    "用户明确选择后才能调用 apply_plan_alternative，并等待确认。"
+                ),
+                allowed_tools=[
+                    "get_current_time",
+                    "get_tasks",
+                    "get_events",
+                    "get_schedules",
+                    "compare_plan_alternatives",
+                    "apply_plan_alternative",
+                ],
+                priority=16,
+            ),
+            Skill(
                 name="plan_health",
                 description="检查当前计划的截止、冲突与负载风险",
                 keywords=["计划风险", "健康度", "有没有风险", "来得及", "排得下", "计划合理"],

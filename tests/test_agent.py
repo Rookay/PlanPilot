@@ -277,6 +277,17 @@ class AgentLoopTests(TestCase):
         self.assertIsNotNone(tool)
         self.assertEqual(tool.confirmation, "none")
 
+    def test_plan_alternatives_skill_requires_choice_before_apply(self):
+        skill = build_default_skills().select("给我几套方案对比一下，不要直接应用")
+
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill.name, "plan_alternatives")
+        self.assertIn("compare_plan_alternatives", skill.allowed_tools)
+        self.assertIn("apply_plan_alternative", skill.allowed_tools)
+        registry = build_default_registry()
+        self.assertEqual(registry.get("compare_plan_alternatives").confirmation, "none")
+        self.assertEqual(registry.get("apply_plan_alternative").confirmation, "confirm")
+
     def test_travel_itinerary_is_confirmed_and_created_as_one_batch(self):
         events = [
             {

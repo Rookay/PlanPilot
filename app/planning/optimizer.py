@@ -14,6 +14,7 @@ from app.planning.engine import (
     PlanFailure,
     PlanResult,
     PlanTask,
+    planning_weight,
 )
 
 try:
@@ -176,14 +177,9 @@ def _solve_once(
                         model.Add(child_var + parent_var <= 1)
 
     objective = []
-    priority_score = {"high": 900, "medium": 600, "low": 350}
     for task in tasks:
         for choice, candidate, duration_ticks in choices[task.id]:
-            score = priority_score.get(task.priority, 600) + duration_ticks * 20
-            if strategy == "deadline_first" and task.deadline is not None:
-                score += 500
-            elif strategy == "priority_first":
-                score += priority_score.get(task.priority, 600) // 2
+            score = planning_weight(task, strategy, origin) + duration_ticks * 20
             if any(start <= candidate and candidate + timedelta(minutes=duration_ticks * SLOT_MINUTES) <= end for start, end in task.preferred_windows):
                 score += 180
             score -= min(_ticks(origin, candidate), 10000) // 8

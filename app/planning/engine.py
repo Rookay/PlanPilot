@@ -26,6 +26,7 @@ DEFAULT_DAY_END = time(22, 0)
 
 # 优先级排序权重，数值越小越先安排。
 PRIORITY_WEIGHT = {"high": 0, "medium": 1, "low": 2}
+PRIORITY_SCORE = {"high": 900, "medium": 600, "low": 350}
 
 
 @dataclass
@@ -164,19 +165,40 @@ def _find_free_slot(
     return None
 
 
-def _sort_key(task: PlanTask, strategy: str = "balanced"):
+def planning_weight(
+    task: PlanTask,
+    strategy: str,
+    reference_time: datetime,
+) -> int:
+    """Return a comparable task value for greedy and CP-SAT planning."""
+
+    score = PRIORITY_SCORE.get(task.priority, 600)
+    if strategy == "deadline_first" and task.deadline is not None:
+        slack_hours = max(
+            0,
+            int((task.deadline - reference_time).total_seconds() // 3600),
+        )
+        # A deadline only dominates priority when it is genuinely close. Distant
+        # deadlines retain a small tie-break bonus instead of a blanket boost.
+        score += max(50, 1200 - slack_hours * 10)
+    elif strategy == "priority_first":
+        score += PRIORITY_SCORE.get(task.priority, 600) // 2
+    return score
+
+
+def _sort_key(
+    task: PlanTask,
+    strategy: str = "balanced",
+    reference_time: Optional[datetime] = None,
+):
     """按固定时间、用户选择的策略和创建时间稳定排序。"""
 
     start = task.start_time or task.earliest_start
     deadline = task.deadline
     fixed = (start is None, start or datetime.max)
-    priority = PRIORITY_WEIGHT.get(task.priority, 1)
     due = (deadline is None, deadline or datetime.max)
-    if strategy == "deadline_first":
-        order = (*fixed, *due, priority)
-    else:
-        # balanced 与 priority_first 都先保护高优先级，再在同级内照顾截止时间。
-        order = (*fixed, priority, *due)
+    reference = reference_time or task.created_at or datetime.min
+    order = (*fixed, -planning_weight(task, strategy, reference), *due)
     return (*order, task.created_at or datetime.min)
 
 
@@ -252,7 +274,7 @@ def generate_plan(
     busy = _merge_intervals(busy)
 
     gap = timedelta(minutes=max(gap_minutes, 0))
-    ordered = _dependency_order(tasks, strategy)
+    ordered = _dependency_order(tasks, strategy, horizon_start)
 
     assignments: List[PlanAssignment] = []
     failures: List[PlanFailure] = []
@@ -381,10 +403,17 @@ def generate_plan(
     return PlanResult(assignments=assignments, failures=failures)
 
 
-def _dependency_order(tasks: Sequence[PlanTask], strategy: str) -> List[PlanTask]:
+def _dependency_order(
+    tasks: Sequence[PlanTask],
+    strategy: str,
+    reference_time: datetime,
+) -> List[PlanTask]:
     """在原有优先级排序上加入稳定的拓扑顺序。"""
 
-    base = sorted(tasks, key=lambda task: _sort_key(task, strategy))
+    base = sorted(
+        tasks,
+        key=lambda task: _sort_key(task, strategy, reference_time),
+    )
     by_id = {task.id: task for task in base}
     ordered: List[PlanTask] = []
     visiting: Set[int] = set()

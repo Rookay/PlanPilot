@@ -248,6 +248,123 @@ class EvaluatePlanTool(Tool):
         )
 
 
+class ComparePlanAlternativesTool(Tool):
+    name = "compare_plan_alternatives"
+    description = "只读生成截止优先、均衡节奏和集中处理三套规划方案供用户比较。"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string"},
+            "days": {"type": "integer"},
+            "windows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "start": {"type": "string"},
+                        "end": {"type": "string"},
+                    },
+                    "required": ["start", "end"],
+                },
+            },
+            "gap_minutes": {"type": "integer"},
+        },
+        "required": [],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
+    confirmation = "none"
+
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            result = schedule_service.generate_plan_alternatives(
+                db, _build_generate_payload(kwargs)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        recommended = next(
+            item for item in result.alternatives if item.recommended
+        )
+        return ToolResult(
+            success=True,
+            data=result.model_dump(mode="json"),
+            summary=(
+                f"已生成 3 套方案，推荐「{recommended.title}」："
+                f"{recommended.recommendation_reason}"
+            ),
+        )
+
+
+class ApplyPlanAlternativeTool(Tool):
+    name = "apply_plan_alternative"
+    description = "在用户选定后应用一套规划方案，替换当前范围内未锁定的待确认安排。"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            **ComparePlanAlternativesTool.input_schema["properties"],
+            "profile": {
+                "type": "string",
+                "enum": ["deadline", "balanced", "focus"],
+            },
+        },
+        "required": ["profile"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
+    confirmation = "confirm"
+
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            result = schedule_service.apply_plan_alternative(
+                db,
+                _build_generate_payload(kwargs),
+                kwargs["profile"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        return ToolResult(
+            success=True,
+            data={
+                "profile": kwargs["profile"],
+                "schedules": [
+                    {
+                        "id": item.id,
+                        "task_id": item.task_id,
+                        "start_time": item.start_time.isoformat() + "Z",
+                        "end_time": item.end_time.isoformat() + "Z",
+                    }
+                    for item in result.schedules
+                ],
+                "analysis": result.analysis.model_dump(),
+                "batch_id": result.batch_id,
+            },
+            summary=f"已应用方案，生成 {len(result.schedules)} 条待确认安排",
+        )
+
+    def preview(self, db: Session, **kwargs: Any) -> ToolResult:
+        try:
+            result = schedule_service.generate_plan_alternatives(
+                db, _build_generate_payload(kwargs)
+            )
+            alternative = next(
+                item for item in result.alternatives
+                if item.profile == kwargs["profile"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        counts = preview.get("comparison", {}).get("counts", {})
+        unscheduled_count = len(preview.get("unscheduled", []))
+        return ToolResult(
+            success=True,
+            needs_confirmation=True,
+            data=alternative.model_dump(mode="json"),
+            summary=(
+                f"将应用「{alternative.title}」，生成 {len(alternative.schedules)} 个时间块，"
+                f"替换当前范围内未锁定的待确认安排"
+            ),
+        )
+
+
 class ReplanTool(Tool):
     name = "replan"
     description = (
@@ -365,7 +482,9 @@ class LocalReplanTool(Tool):
             data=preview,
             summary=(
                 f"将保留 {preview['kept_locked']} 条锁定日程，"
-                f"重排 {len(preview['removed'])} 条安排"
+                f"移动 {counts.get('moved', 0)} 条、新增 {counts.get('added', 0)} 条、"
+                f"移除 {counts.get('removed', 0)} 条；"
+                f"{unscheduled_count} 项暂时无法安排"
             ),
         )
 
