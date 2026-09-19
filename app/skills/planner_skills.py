@@ -34,6 +34,25 @@ def build_default_skills() -> SkillRegistry:
                 priority=20,
             ),
             Skill(
+                name="plan_health",
+                description="检查当前计划的截止、冲突与负载风险",
+                keywords=["计划风险", "健康度", "有没有风险", "来得及", "排得下", "计划合理"],
+                system_hint=(
+                    "【计划守护】先用 get_current_time 明确用户所说的今天或本周，"
+                    "再调用 analyze_plan_risks 且只分析目标范围。先解释风险和建议，"
+                    "除非用户明确要求调整，否则不要调用会修改日程的工具。"
+                ),
+                allowed_tools=[
+                    "get_current_time",
+                    "analyze_plan_risks",
+                    "get_tasks",
+                    "get_events",
+                    "get_schedules",
+                    "replan_local",
+                ],
+                priority=15,
+            ),
+            Skill(
                 name="task_understanding",
                 description="把自然语言需求转换为结构化任务",
                 keywords=["要做", "需要完成", "添加任务", "新建任务", "创建任务", "记得"],

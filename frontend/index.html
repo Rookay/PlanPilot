@@ -567,6 +567,9 @@
         </section>
 
         <div class="modal-buttons calendar-detail-actions">
+            <button id="calendarDetailDeleteOneButton" class="danger-button hidden" type="button" onclick="runCalendarDetailDelete('one')">删除此项</button>
+            <button id="calendarDetailDeleteGroupButton" class="danger-button hidden" type="button" onclick="runCalendarDetailDelete('group')">删除整组</button>
+            <span class="calendar-detail-action-spacer"></span>
             <button type="button" onclick="closeCalendarItemDetails()">关闭</button>
             <button id="calendarDetailEditButton" class="primary-button" type="button" onclick="editCalendarDetailItem()">编辑</button>
         </div>

@@ -21,6 +21,7 @@ from app.tools.map_tools import (
     SearchPlacesTool,
 )
 from app.tools.planning_tools import (
+    AnalyzePlanRisksTool,
     CheckConflictsTool,
     EvaluatePlanTool,
     GeneratePlanTool,
@@ -76,6 +77,7 @@ def build_default_registry() -> ToolRegistry:
         DeleteScheduleTool(),
         # Planning
         GeneratePlanTool(),
+        AnalyzePlanRisksTool(),
         CheckConflictsTool(),
         EvaluatePlanTool(),
         ReplanTool(),

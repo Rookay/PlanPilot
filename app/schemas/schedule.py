@@ -2,7 +2,7 @@
 # Project ：mine
 # File    ：schedule.py
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -134,3 +134,23 @@ class ScheduleMovePreview(BaseModel):
     valid: bool
     warnings: List[str] = Field(default_factory=list)
     conflicts: List[str] = Field(default_factory=list)
+
+
+class PlanRisk(BaseModel):
+    code: str
+    severity: Literal["critical", "warning", "info"]
+    title: str
+    detail: str
+    task_ids: List[int] = Field(default_factory=list)
+    schedule_ids: List[int] = Field(default_factory=list)
+    action: Literal["replan", "review"] = "review"
+
+
+class PlanRiskReport(BaseModel):
+    start: datetime
+    end: datetime
+    health_score: int = Field(ge=0, le=100)
+    counts: Dict[str, int] = Field(default_factory=dict)
+    risks: List[PlanRisk] = Field(default_factory=list)
+    can_replan: bool = False
+    recommendation: str = ""

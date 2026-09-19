@@ -155,6 +155,98 @@ class ServiceTests(TestCase):
         else:
             self.assertEqual(optimized["analysis"]["selected_mode"], "optimized")
 
+    def test_plan_risk_report_is_scoped_and_actionable(self):
+        urgent = task_service.create_task(
+            self.db,
+            TaskCreate(
+                title="临近截止任务",
+                estimated_duration=180,
+                deadline=datetime(2026, 9, 16, 10),
+            ),
+        )
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="范围内会议",
+                start_time=datetime(2026, 9, 16, 1),
+                end_time=datetime(2026, 9, 16, 3),
+            ),
+        )
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="范围外会议",
+                start_time=datetime(2026, 9, 20, 1),
+                end_time=datetime(2026, 9, 20, 2),
+            ),
+        )
+
+        report = schedule_service.analyze_plan_risks(
+            self.db,
+            datetime(2026, 9, 16),
+            datetime(2026, 9, 17),
+        )
+
+        self.assertTrue(report.can_replan)
+        self.assertLess(report.health_score, 100)
+        deadline_risk = next(item for item in report.risks if item.code == "deadline_at_risk")
+        self.assertEqual(deadline_risk.task_ids, [urgent.id])
+        self.assertFalse(any("范围外会议" in item.detail for item in report.risks))
+
+    def test_plan_risk_report_detects_current_range_conflict(self):
+        first = task_service.create_task(
+            self.db,
+            TaskCreate(title="第一项", estimated_duration=60),
+        )
+        schedule = Schedule(
+            task_id=first.id,
+            start_time=datetime(2026, 9, 16, 2),
+            end_time=datetime(2026, 9, 16, 4),
+            status="proposed",
+        )
+        self.db.add(schedule)
+        self.db.commit()
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="冲突会议",
+                start_time=datetime(2026, 9, 16, 3),
+                end_time=datetime(2026, 9, 16, 5),
+            ),
+        )
+
+        report = schedule_service.analyze_plan_risks(
+            self.db,
+            datetime(2026, 9, 16),
+            datetime(2026, 9, 17),
+        )
+
+        conflict = next(item for item in report.risks if item.code == "time_conflict")
+        self.assertEqual(conflict.severity, "critical")
+        self.assertEqual(conflict.schedule_ids, [schedule.id])
+
+    def test_fixed_only_overload_does_not_offer_task_replan(self):
+        for index, (start, end) in enumerate(((1, 7), (7, 12))):
+            event_service.create_event(
+                self.db,
+                EventCreate(
+                    title=f"固定安排 {index + 1}",
+                    start_time=datetime(2026, 9, 16, start),
+                    end_time=datetime(2026, 9, 16, end),
+                ),
+            )
+
+        report = schedule_service.analyze_plan_risks(
+            self.db,
+            datetime(2026, 9, 16),
+            datetime(2026, 9, 17),
+        )
+
+        self.assertFalse(report.can_replan)
+        load_risk = next(item for item in report.risks if item.code == "daily_overload")
+        self.assertEqual(load_risk.action, "review")
+        self.assertIn("固定日程", load_risk.detail)
+
     def test_auto_mode_uses_complexity_signals(self):
         for index in range(6):
             task_service.create_task(
@@ -278,6 +370,34 @@ class ServiceTests(TestCase):
             )
         unchanged = event_service.get_trip_events(self.db, trip_id)
         self.assertEqual([item.start_time for item in unchanged], [item.start_time for item in revised])
+
+    def test_whole_trip_group_can_be_deleted_atomically(self):
+        grouped = event_service.create_events(
+            self.db,
+            [
+                EventCreate(
+                    title=f"组内第 {index + 1} 段",
+                    start_time=datetime(2026, 9, 20, 1 + index),
+                    end_time=datetime(2026, 9, 20, 2 + index),
+                )
+                for index in range(3)
+            ],
+            trip_title="周末安排",
+        )
+        standalone = event_service.create_event(
+            self.db,
+            EventCreate(
+                title="独立日程",
+                start_time=datetime(2026, 9, 21, 1),
+                end_time=datetime(2026, 9, 21, 2),
+            ),
+        )
+
+        result = event_service.delete_trip(self.db, grouped[0].trip_id)
+
+        self.assertEqual(result["deleted"], 3)
+        self.assertEqual(result["trip_title"], "周末安排")
+        self.assertEqual([item.id for item in event_service.list_events(self.db)], [standalone.id])
 
     def test_planning_reserves_amap_travel_time_between_locations(self):
         event_service.create_event(
@@ -487,6 +607,41 @@ class ServiceTests(TestCase):
                 datetime(2026, 9, 18, 3, 30),
             )
         self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("固定日程「会议」", str(caught.exception.detail))
+        self.assertIn("9月18日 10:00–11:00", str(caught.exception.detail))
+
+    def test_schedule_move_conflict_names_schedule_and_local_time(self):
+        first = task_service.create_task(self.db, TaskCreate(title="写报告"))
+        second = task_service.create_task(self.db, TaskCreate(title="整理数据"))
+        existing = schedule_service.create_schedule(
+            self.db,
+            first.id,
+            datetime(2026, 9, 18, 2),
+            datetime(2026, 9, 18, 3),
+            status="accepted",
+        )
+        moving = schedule_service.create_schedule(
+            self.db,
+            second.id,
+            datetime(2026, 9, 18, 4),
+            datetime(2026, 9, 18, 5),
+        )
+
+        preview = schedule_service.preview_schedule_update(
+            self.db,
+            moving.id,
+            ScheduleUpdate(
+                start_time=datetime(2026, 9, 18, 2, 30),
+                end_time=datetime(2026, 9, 18, 3, 30),
+            ),
+        )
+
+        self.assertFalse(preview.valid)
+        message = "；".join(preview.conflicts)
+        self.assertIn("任务安排「写报告」", message)
+        self.assertIn(f"#{existing.id}", message)
+        self.assertIn("9月18日 10:00–11:00", message)
+        self.assertIn("已确认", message)
 
     def test_saved_location_is_available_to_agent_context(self):
         location_service.create_location(
@@ -1042,6 +1197,35 @@ class ServiceTests(TestCase):
         restored = schedule_service.list_schedules(self.db)[0]
         self.assertEqual(restored.start_time, datetime(2026, 9, 16, 1))
         self.assertEqual(restored.end_time, datetime(2026, 9, 16, 2))
+
+    def test_all_task_schedule_chunks_can_be_removed_and_undone(self):
+        task = task_service.create_task(
+            self.db,
+            TaskCreate(title="分段论文", estimated_duration=120),
+        )
+        other = task_service.create_task(
+            self.db,
+            TaskCreate(title="其它任务", estimated_duration=60),
+        )
+        first = schedule_service.create_schedule(
+            self.db, task.id, datetime(2026, 9, 18, 1), datetime(2026, 9, 18, 2)
+        )
+        second = schedule_service.create_schedule(
+            self.db, task.id, datetime(2026, 9, 18, 3), datetime(2026, 9, 18, 4)
+        )
+        other_schedule = schedule_service.create_schedule(
+            self.db, other.id, datetime(2026, 9, 18, 5), datetime(2026, 9, 18, 6)
+        )
+
+        deleted = schedule_service.delete_task_schedules(self.db, task.id)
+
+        self.assertEqual(deleted["ids"], [first.id, second.id])
+        self.assertIsNotNone(task_service.get_task(self.db, task.id))
+        self.assertEqual([item.id for item in schedule_service.list_schedules(self.db)], [other_schedule.id])
+
+        schedule_service.undo_latest_plan(self.db)
+        restored_ids = {item.id for item in schedule_service.list_schedules(self.db)}
+        self.assertEqual(restored_ids, {first.id, second.id, other_schedule.id})
 
     def test_service_generates_all_chunks_for_splittable_task(self):
         task = task_service.create_task(

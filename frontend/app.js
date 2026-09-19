@@ -47,6 +47,7 @@ const state = {
   itineraryInfoWindow: null,
   calendarDetailMap: null,
   calendarDetailEdit: null,
+  calendarDetailDelete: null,
   planVersions: [],
   calendarDrag: null,
   suppressCalendarClickUntil: 0,
@@ -963,7 +964,12 @@ async function submitEvent() {
 }
 
 async function deleteEvent(id) {
-  if (!confirm("确定删除这个固定日程吗？")) {
+  const event = state.events.find((item) => item.id === Number(id));
+  if (event?.trip_id) {
+    openCalendarItemDetails("event", id);
+    return;
+  }
+  if (!confirm(`确定删除固定日程「${event?.title || `#${id}`}」吗？`)) {
     return;
   }
 
@@ -1399,9 +1405,7 @@ function setPlanningScope(scope) {
     $("planStart").value = toDateTimeLocalValue(now);
     $("planDays").value = 1;
   } else if (scope === "week") {
-    const weekday = (now.getDay() + 6) % 7;
-    $("planStart").value = toDateTimeLocalValue(now);
-    $("planDays").value = Math.max(1, 7 - weekday);
+    syncPlanningWeekRange();
   }
   for (const name of ["today", "week", "custom"]) {
     const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
@@ -1409,6 +1413,18 @@ function setPlanningScope(scope) {
   }
   closePlanComparison();
   renderPlanningOverview();
+}
+
+function syncPlanningWeekRange() {
+  const now = new Date();
+  const weekStart = state.weekStart || startOfWeek(now);
+  const weekEnd = addDays(weekStart, 7);
+  const rangeStart = weekStart <= now && now < weekEnd ? now : weekStart;
+  $("planStart").value = toDateTimeLocalValue(rangeStart);
+  $("planDays").value = Math.max(
+    1,
+    Math.ceil((weekEnd - rangeStart) / (24 * 60 * 60 * 1000)),
+  );
 }
 
 function setPlanningMode(mode) {
@@ -1742,6 +1758,20 @@ async function acceptSchedule(id) {
 }
 
 async function deleteSchedule(id) {
+  const schedule = state.schedules.find((item) => item.id === Number(id));
+  const siblings = schedule
+    ? state.schedules.filter(
+        (item) => item.task_id === schedule.task_id && ["accepted", "proposed"].includes(item.status),
+      )
+    : [];
+  if (siblings.length > 1) {
+    openCalendarItemDetails("schedule", id);
+    return;
+  }
+  const task = schedule ? state.tasks.find((item) => item.id === schedule.task_id) : null;
+  if (!confirm(`确定移除任务安排「${task?.title || `#${id}`}」吗？`)) {
+    return;
+  }
   try {
     await api(`/schedules/${id}`, { method: "DELETE" });
     await refreshSchedules();
@@ -2281,6 +2311,11 @@ function buildCalendarItemDetail(kind, id) {
     const destination = resolveRecordLocation(event);
     const origin = resolveRecordLocation(event, "origin_location");
     const isTravel = event.event_type === "travel";
+    const groupEvents = event.trip_id
+      ? state.events
+          .filter((item) => item.trip_id === event.trip_id)
+          .sort((first, second) => (first.trip_order || 0) - (second.trip_order || 0))
+      : [];
     const locationText = isTravel
       ? `${origin?.label || "继承上一地点"} → ${destination?.label || "未指定目的地"}`
       : destination?.label || "";
@@ -2294,11 +2329,18 @@ function buildCalendarItemDetail(kind, id) {
         ["时间", calendarTimeRange(start, end)],
         ["时长", calendarDurationText(start, end)],
         ...(isTravel ? [["交通方式", travelModeName(event.travel_mode)]] : []),
-        ...(event.trip_id ? [["日程组", event.trip_title || "未命名日程组"]] : []),
+        ...(event.trip_id ? [
+          ["日程组", event.trip_title || "未命名日程组"],
+          ["组内位置", `第 ${event.trip_order || groupEvents.indexOf(event) + 1} 段，共 ${groupEvents.length} 段`],
+        ] : []),
       ],
       locationText,
       locations: isTravel ? [origin, destination].filter(Boolean) : [destination].filter(Boolean),
       edit: () => openEventModal(event.id),
+      deleteOne: () => deleteCalendarEvent(event, false),
+      deleteGroup: groupEvents.length > 1 ? () => deleteCalendarEvent(event, true) : null,
+      deleteOneLabel: "删除此段",
+      deleteGroupLabel: `删除整组（${groupEvents.length} 段）`,
     };
   }
 
@@ -2311,6 +2353,11 @@ function buildCalendarItemDetail(kind, id) {
     const start = parseDate(schedule.start_time);
     const end = parseDate(schedule.end_time);
     const location = resolveRecordLocation(task);
+    const taskSchedules = state.schedules
+      .filter(
+        (item) => item.task_id === schedule.task_id && ["accepted", "proposed"].includes(item.status),
+      )
+      .sort((first, second) => parseDate(first.start_time) - parseDate(second.start_time));
     return {
       title: task?.title || `任务 #${schedule.task_id}`,
       badge: schedule.status === "accepted" ? "已确认安排" : "待确认安排",
@@ -2322,11 +2369,19 @@ function buildCalendarItemDetail(kind, id) {
         ["时长", calendarDurationText(start, end)],
         ["优先级", task ? getPriorityName(task.priority) : "未设置"],
         ["锁定", schedule.is_locked ? "已锁定" : "未锁定"],
-        ["分段", schedule.chunk_index > 1 ? `第 ${schedule.chunk_index} 段` : "单段"],
+        ["分段", taskSchedules.length > 1
+          ? `第 ${taskSchedules.indexOf(schedule) + 1} 段，共 ${taskSchedules.length} 段`
+          : "单段"],
       ],
       locationText: location?.label || "",
       locations: [location].filter(Boolean),
       edit: task ? () => openTaskModal(task.id) : null,
+      deleteOne: () => deleteCalendarSchedule(schedule, false),
+      deleteGroup: taskSchedules.length > 1
+        ? () => deleteCalendarSchedule(schedule, true)
+        : null,
+      deleteOneLabel: "移除此时间块",
+      deleteGroupLabel: `移除全部安排（${taskSchedules.length} 段）`,
     };
   }
 
@@ -2384,7 +2439,17 @@ function openCalendarItemDetails(kind, id) {
   $("calendarDetailLocationText").textContent = detail.locationText || "";
 
   state.calendarDetailEdit = detail.edit;
+  state.calendarDetailDelete = {
+    one: detail.deleteOne || null,
+    group: detail.deleteGroup || null,
+  };
   $("calendarDetailEditButton").classList.toggle("hidden", !detail.edit);
+  const deleteOneButton = $("calendarDetailDeleteOneButton");
+  const deleteGroupButton = $("calendarDetailDeleteGroupButton");
+  deleteOneButton.classList.toggle("hidden", !detail.deleteOne);
+  deleteGroupButton.classList.toggle("hidden", !detail.deleteGroup);
+  deleteOneButton.textContent = detail.deleteOneLabel || "删除此项";
+  deleteGroupButton.textContent = detail.deleteGroupLabel || "删除整组";
   $("calendarDetailModal").classList.remove("hidden");
   if (detail.locations.length) {
     showCalendarDetailMapFallback("地图加载中...");
@@ -2398,6 +2463,7 @@ function openCalendarItemDetails(kind, id) {
 function closeCalendarItemDetails() {
   $("calendarDetailModal").classList.add("hidden");
   state.calendarDetailEdit = null;
+  state.calendarDetailDelete = null;
 }
 
 function handleCalendarDetailBackdrop(event) {
@@ -2410,6 +2476,64 @@ function editCalendarDetailItem() {
   const edit = state.calendarDetailEdit;
   closeCalendarItemDetails();
   edit?.();
+}
+
+async function runCalendarDetailDelete(scope) {
+  const action = state.calendarDetailDelete?.[scope];
+  if (action) {
+    await action();
+  }
+}
+
+async function deleteCalendarEvent(event, wholeGroup) {
+  const group = event.trip_id
+    ? state.events
+        .filter((item) => item.trip_id === event.trip_id)
+        .sort((first, second) => (first.trip_order || 0) - (second.trip_order || 0))
+    : [event];
+  const message = wholeGroup
+    ? `确定删除日程组「${event.trip_title || "未命名日程组"}」的全部 ${group.length} 段吗？\n\n${group.map((item, index) => `${index + 1}. ${item.title}`).join("\n")}`
+    : `确定只删除「${event.title}」吗？${event.trip_id ? "\n删除单段可能使连续路线不完整。" : ""}`;
+  if (!confirm(message)) {
+    return;
+  }
+  try {
+    await api(
+      wholeGroup ? `/events/trips/${encodeURIComponent(event.trip_id)}` : `/events/${event.id}`,
+      { method: "DELETE" },
+    );
+    closeCalendarItemDetails();
+    await loadAllData();
+  } catch (error) {
+    alert(`删除失败：${error.message}`);
+  }
+}
+
+async function deleteCalendarSchedule(schedule, wholeTask) {
+  const task = state.tasks.find((item) => item.id === schedule.task_id);
+  const schedules = state.schedules
+    .filter(
+      (item) => item.task_id === schedule.task_id && ["accepted", "proposed"].includes(item.status),
+    )
+    .sort((first, second) => parseDate(first.start_time) - parseDate(second.start_time));
+  const message = wholeTask
+    ? `确定移除任务「${task?.title || `#${schedule.task_id}`}」的全部 ${schedules.length} 个时间块吗？\n任务本身会保留。\n\n${schedules.map((item, index) => `${index + 1}. ${formatDateTime(item.start_time)}`).join("\n")}`
+    : `确定只移除「${task?.title || `#${schedule.task_id}`}」的这个时间块吗？`;
+  if (!confirm(message)) {
+    return;
+  }
+  try {
+    await api(
+      wholeTask ? `/schedules/task/${schedule.task_id}` : `/schedules/${schedule.id}`,
+      { method: "DELETE" },
+    );
+    closeCalendarItemDetails();
+    await loadAllData();
+    renderSchedule(null);
+    loadPlanVersions().catch(handleError);
+  } catch (error) {
+    alert(`移除失败：${error.message}`);
+  }
 }
 
 function showCalendarDetailMapFallback(message) {
@@ -2482,16 +2606,28 @@ async function renderCalendarDetailMap(locations) {
 
 function previousWeek() {
   state.weekStart = addDays(state.weekStart || startOfWeek(new Date()), -7);
+  if (!$("planning")?.classList.contains("hidden") && state.planningScope === "week") {
+    syncPlanningWeekRange();
+    renderPlanningOverview();
+  }
   renderTimetables();
 }
 
 function nextWeek() {
   state.weekStart = addDays(state.weekStart || startOfWeek(new Date()), 7);
+  if (!$("planning")?.classList.contains("hidden") && state.planningScope === "week") {
+    syncPlanningWeekRange();
+    renderPlanningOverview();
+  }
   renderTimetables();
 }
 
 function goToday() {
   state.weekStart = startOfWeek(new Date());
+  if (!$("planning")?.classList.contains("hidden") && state.planningScope === "week") {
+    syncPlanningWeekRange();
+    renderPlanningOverview();
+  }
   renderTimetables();
 }
 

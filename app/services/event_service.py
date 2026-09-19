@@ -423,6 +423,19 @@ def delete_events(db: Session, event_ids: List[int]) -> dict:
     }
 
 
+def delete_trip(db: Session, trip_id: str) -> dict:
+    """Atomically delete every event in one explicit trip group."""
+
+    events = get_trip_events(db, trip_id)
+    title = events[0].trip_title or "未命名日程组"
+    result = delete_events(db, [event.id for event in events])
+    return {
+        **result,
+        "trip_id": trip_id,
+        "trip_title": title,
+    }
+
+
 def _validate_location(db: Session, location_id: int | None) -> None:
     if location_id is not None:
         location_service.get_location(db, location_id)

@@ -692,6 +692,21 @@ body {
     border-top: 1px solid var(--line);
 }
 
+.calendar-detail-action-spacer {
+    flex: 1 1 auto;
+}
+
+.modal-buttons .danger-button {
+    border-color: #e5b7ad;
+    background: #fff7f5;
+    color: #a83f2e;
+}
+
+.modal-buttons .danger-button:hover {
+    border-color: #d99586;
+    background: #fbe9e5;
+}
+
 
 /* 周导航与图例 */
 

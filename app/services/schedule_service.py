@@ -3,9 +3,10 @@
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from itertools import zip_longest
 from typing import Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import and_, or_
@@ -38,6 +39,8 @@ from app.planning.windows import (
 from app.schemas.preference import PreferenceSettings
 from app.schemas.schedule import (
     PlanAnalysis,
+    PlanRisk,
+    PlanRiskReport,
     LocalReplanRequest,
     ScheduleGenerateRequest,
     ScheduleGenerateResponse,
@@ -319,6 +322,44 @@ def delete_schedule(db: Session, schedule_id: int) -> dict:
     return {"message": "Schedule deleted", "id": schedule_id, "version_id": version.id}
 
 
+def delete_task_schedules(db: Session, task_id: int) -> dict:
+    """Remove all active schedule blocks for one task as one undoable change."""
+
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    schedules = (
+        db.query(Schedule)
+        .filter(
+            Schedule.task_id == task_id,
+            Schedule.status.in_(("accepted", "proposed")),
+        )
+        .order_by(Schedule.start_time, Schedule.id)
+        .all()
+    )
+    if not schedules:
+        raise HTTPException(status_code=404, detail="该任务没有可移除的有效安排")
+    version = plan_version_service.begin_version(
+        db,
+        "delete_task_schedules",
+        f"移除任务「{task.title}」的全部安排",
+    )
+    ids = [schedule.id for schedule in schedules]
+    for schedule in schedules:
+        db.delete(schedule)
+    db.flush()
+    plan_version_service.finalize_version(db, version)
+    db.commit()
+    return {
+        "message": "Task schedules deleted",
+        "task_id": task_id,
+        "task_title": task.title,
+        "ids": ids,
+        "deleted": len(ids),
+        "version_id": version.id,
+    }
+
+
 def find_free_slots(
     db: Session,
     start: datetime,
@@ -335,6 +376,241 @@ def find_free_slots(
         busy_intervals=busy,
         min_duration=timedelta(minutes=min_duration_minutes),
         windows=windows,
+    )
+
+
+def analyze_plan_risks(
+    db: Session,
+    start: datetime,
+    end: datetime,
+) -> PlanRiskReport:
+    """Analyze only the requested planning range without modifying schedules."""
+
+    start, end = _normalize_range(start, end)
+    now = time_policy.utcnow()
+    effective_start = max(start, now)
+    prefs = preference_service.get_preferences(db)
+    risks: List[PlanRisk] = []
+
+    active_schedules = (
+        db.query(Schedule)
+        .filter(
+            Schedule.status.in_(("accepted", "proposed")),
+            Schedule.end_time > start,
+            Schedule.start_time < end,
+        )
+        .order_by(Schedule.start_time, Schedule.id)
+        .all()
+    )
+    events = (
+        db.query(Event)
+        .filter(Event.end_time > start, Event.start_time < end)
+        .order_by(Event.start_time, Event.id)
+        .all()
+    )
+    tasks = (
+        db.query(Task)
+        .filter(Task.status.in_(("pending", "in_progress")))
+        .order_by(Task.deadline, Task.id)
+        .all()
+    )
+
+    scheduled_minutes: Dict[int, int] = {}
+    for schedule in db.query(Schedule).filter(
+        Schedule.status.in_(("accepted", "proposed"))
+    ):
+        minutes = int((schedule.end_time - schedule.start_time).total_seconds() // 60)
+        scheduled_minutes[schedule.task_id] = scheduled_minutes.get(schedule.task_id, 0) + minutes
+
+    due_remaining: List[tuple[Task, int]] = []
+    for task in tasks:
+        deadline = to_naive_utc(task.deadline)
+        if deadline is None or deadline > end:
+            continue
+        remaining = max(0, task.estimated_duration - scheduled_minutes.get(task.id, 0))
+        if remaining <= 0:
+            continue
+        due_remaining.append((task, remaining))
+        overdue = deadline <= now
+        hours_left = max(0, int((deadline - now).total_seconds() // 3600))
+        risks.append(
+            PlanRisk(
+                code="overdue_task" if overdue else "deadline_at_risk",
+                severity="critical" if overdue or hours_left <= 24 else "warning",
+                title=f"{task.title} 尚有 {remaining} 分钟未安排",
+                detail=(
+                    "截止时间已过，请调整截止时间或尽快补排"
+                    if overdue
+                    else f"距离截止约 {hours_left} 小时，建议纳入当前重排"
+                ),
+                task_ids=[task.id],
+                action="replan",
+            )
+        )
+
+    intervals: List[Interval] = []
+    schedule_interval_ids: Dict[int, int] = {}
+    for event in events:
+        intervals.append(
+            Interval(event.id, f"固定日程「{event.title}」", event.start_time, event.end_time)
+        )
+    for schedule in active_schedules:
+        interval = Interval(
+            -schedule.id,
+            f"任务安排 #{schedule.id}",
+            schedule.start_time,
+            schedule.end_time,
+        )
+        intervals.append(interval)
+        schedule_interval_ids[id(interval)] = schedule.id
+    for conflict in engine_check_conflicts(intervals):
+        schedule_ids = [
+            schedule_interval_ids[item_id]
+            for item_id in (id(conflict.first), id(conflict.second))
+            if item_id in schedule_interval_ids
+        ]
+        risks.append(
+            PlanRisk(
+                code="time_conflict",
+                severity="critical",
+                title="当前范围存在时间冲突",
+                detail=(
+                    f"{conflict.first.title} 与 {conflict.second.title}"
+                    f"重叠 {conflict.overlap_minutes} 分钟"
+                ),
+                schedule_ids=schedule_ids,
+                action="replan" if schedule_ids else "review",
+            )
+        )
+
+    blocks = sorted(
+        [
+            (max(start, item.start_time), min(end, item.end_time), item.title)
+            for item in events
+        ]
+        + [
+            (max(start, item.start_time), min(end, item.end_time), f"任务 #{item.task_id}")
+            for item in active_schedules
+        ],
+        key=lambda item: (item[0], item[1]),
+    )
+    has_movable_schedule = any(not item.is_locked for item in active_schedules)
+    _append_load_risks(risks, blocks, prefs, has_movable_schedule)
+
+    if due_remaining and effective_start < end:
+        days = max(1, (end.date() - effective_start.date()).days + 1)
+        windows = [
+            (max(window_start, effective_start), min(window_end, end))
+            for window_start, window_end in build_local_work_windows(effective_start, days, prefs)
+            if min(window_end, end) > max(window_start, effective_start)
+        ]
+        busy = [(item[0], item[1]) for item in blocks] + lunch_intervals(windows, prefs)
+        free_slots = engine_find_free_slots(
+            start=effective_start,
+            days=days,
+            busy_intervals=busy,
+            windows=windows,
+        )
+        free_minutes = sum(int((slot_end - slot_start).total_seconds() // 60) for slot_start, slot_end in free_slots)
+        required_minutes = sum(minutes for _, minutes in due_remaining)
+        if required_minutes > free_minutes:
+            risks.append(
+                PlanRisk(
+                    code="insufficient_capacity",
+                    severity="critical",
+                    title="截止任务超过当前可用时间",
+                    detail=f"尚需 {required_minutes} 分钟，工作时段内仅剩约 {free_minutes} 分钟",
+                    task_ids=[task.id for task, _ in due_remaining],
+                    action="replan",
+                )
+            )
+
+    counts = {
+        severity: sum(item.severity == severity for item in risks)
+        for severity in ("critical", "warning", "info")
+    }
+    health_score = max(0, 100 - counts["critical"] * 25 - counts["warning"] * 10 - counts["info"] * 3)
+    can_replan = any(item.action == "replan" for item in risks)
+    if not risks:
+        recommendation = "当前范围没有发现明显风险"
+    elif can_replan:
+        recommendation = "建议先查看调整方案，确认后再应用"
+    else:
+        recommendation = "建议检查固定日程或适当降低当天负载"
+    return PlanRiskReport(
+        start=start,
+        end=end,
+        health_score=health_score,
+        counts=counts,
+        risks=risks,
+        can_replan=can_replan,
+        recommendation=recommendation,
+    )
+
+
+def _append_load_risks(
+    risks: List[PlanRisk],
+    blocks: List[tuple[datetime, datetime, str]],
+    prefs: PreferenceSettings,
+    has_movable_schedule: bool,
+) -> None:
+    zone = ZoneInfo(prefs.timezone)
+    daily_minutes: Dict[object, int] = {}
+    for block_start, block_end, _ in blocks:
+        local_day = block_start.replace(tzinfo=timezone.utc).astimezone(zone).date()
+        daily_minutes[local_day] = daily_minutes.get(local_day, 0) + int(
+            (block_end - block_start).total_seconds() // 60
+        )
+    for day, minutes in daily_minutes.items():
+        if minutes >= 10 * 60:
+            risks.append(
+                PlanRisk(
+                    code="daily_overload",
+                    severity="warning",
+                    title=f"{day.month}月{day.day}日负载较高",
+                    detail=(
+                        f"已安排约 {minutes / 60:.1f} 小时，可查看调整方案"
+                        if has_movable_schedule
+                        else f"已安排约 {minutes / 60:.1f} 小时，当前均为固定日程，请人工确认强度"
+                    ),
+                    action="replan" if has_movable_schedule else "review",
+                )
+            )
+
+    if not blocks:
+        return
+    chain_start, chain_end = blocks[0][0], blocks[0][1]
+    chain_titles = [blocks[0][2]]
+    minimum_break = timedelta(minutes=max(15, prefs.default_gap_minutes))
+    for block_start, block_end, title in blocks[1:]:
+        if block_start <= chain_end + minimum_break:
+            chain_end = max(chain_end, block_end)
+            chain_titles.append(title)
+            continue
+        _append_continuous_risk(
+            risks, chain_start, chain_end, chain_titles, has_movable_schedule
+        )
+        chain_start, chain_end, chain_titles = block_start, block_end, [title]
+    _append_continuous_risk(
+        risks, chain_start, chain_end, chain_titles, has_movable_schedule
+    )
+
+
+def _append_continuous_risk(risks, start, end, titles, has_movable_schedule) -> None:
+    minutes = int((end - start).total_seconds() // 60)
+    if minutes < 4 * 60 or len(titles) < 2:
+        return
+    risks.append(
+        PlanRisk(
+            code="long_work_chain",
+            severity="warning",
+            title="连续安排时间较长",
+            detail=(
+                f"约 {minutes / 60:.1f} 小时缺少充分间隔，涉及 {len(titles)} 项安排"
+                + ("，可尝试局部重排" if has_movable_schedule else "，且均为固定日程")
+            ),
+            action="replan" if has_movable_schedule else "review",
+        )
     )
 
 
@@ -989,15 +1265,49 @@ def _ensure_slot_available(
 ) -> None:
     for event in db.query(Event).all():
         if _overlaps(start, end, event.start_time, event.end_time):
-            raise HTTPException(status_code=409, detail=f"该时间与事件「{event.title}」冲突")
+            time_text = _local_range_text(db, event.start_time, event.end_time)
+            raise HTTPException(
+                status_code=409,
+                detail=f"该时间与固定日程「{event.title}」（{time_text}）冲突",
+            )
 
     statuses = ("accepted", "proposed") if include_proposed else ("accepted",)
-    query = db.query(Schedule).filter(Schedule.status.in_(statuses))
+    query = (
+        db.query(Schedule, Task)
+        .join(Task, Task.id == Schedule.task_id)
+        .filter(Schedule.status.in_(statuses))
+    )
     if exclude_schedule_id is not None:
         query = query.filter(Schedule.id != exclude_schedule_id)
-    for schedule in query.all():
+    status_labels = {"accepted": "已确认", "proposed": "待确认"}
+    for schedule, task in query.all():
         if _overlaps(start, end, schedule.start_time, schedule.end_time):
-            raise HTTPException(status_code=409, detail=f"该时间与日程 #{schedule.id} 冲突")
+            time_text = _local_range_text(db, schedule.start_time, schedule.end_time)
+            status = status_labels.get(schedule.status, schedule.status)
+            lock_text = "、已锁定" if schedule.is_locked else ""
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"该时间与任务安排「{task.title}」"
+                    f"（#{schedule.id}，{time_text}，{status}{lock_text}）冲突"
+                ),
+            )
+
+
+def _local_range_text(db: Session, start: datetime, end: datetime) -> str:
+    timezone_name = preference_service.get_preferences(db).timezone
+    zone = ZoneInfo(timezone_name)
+    local_start = to_naive_utc(start).replace(tzinfo=timezone.utc).astimezone(zone)
+    local_end = to_naive_utc(end).replace(tzinfo=timezone.utc).astimezone(zone)
+    if local_start.date() == local_end.date():
+        return (
+            f"{local_start.month}月{local_start.day}日 "
+            f"{local_start:%H:%M}–{local_end:%H:%M}"
+        )
+    return (
+        f"{local_start.month}月{local_start.day}日 {local_start:%H:%M}–"
+        f"{local_end.month}月{local_end.day}日 {local_end:%H:%M}"
+    )
 
 
 def _prepare_local_replan(

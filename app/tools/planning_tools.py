@@ -158,6 +158,40 @@ class CheckConflictsTool(Tool):
         )
 
 
+class AnalyzePlanRisksTool(Tool):
+    name = "analyze_plan_risks"
+    description = "分析指定时间范围内的截止、冲突和负载风险，不修改任何数据。"
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "start": {"type": "string", "description": "范围开始时间 ISO 8601 UTC"},
+            "end": {"type": "string", "description": "范围结束时间 ISO 8601 UTC"},
+        },
+        "required": ["start", "end"],
+        "additionalProperties": False,
+    }
+    output_schema = {"type": "object"}
+    confirmation = "none"
+
+    def execute(self, db: Session, **kwargs: Any) -> ToolResult:
+        start = parse_naive_utc(kwargs.get("start"))
+        end = parse_naive_utc(kwargs.get("end"))
+        if start is None or end is None:
+            return ToolResult(success=False, error="必须提供有效的风险分析时间范围")
+        try:
+            report = schedule_service.analyze_plan_risks(db, start, end)
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(success=False, error=str(exc))
+        return ToolResult(
+            success=True,
+            data=report.model_dump(mode="json"),
+            summary=(
+                f"计划健康度 {report.health_score} 分，"
+                f"发现 {len(report.risks)} 项风险"
+            ),
+        )
+
+
 class EvaluatePlanTool(Tool):
     name = "evaluate_plan"
     description = "干跑规划并评估质量（分数 + 问题列表），不修改数据。"

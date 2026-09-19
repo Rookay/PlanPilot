@@ -7,6 +7,7 @@
 本文件只做路由绑定。
 """
 
+from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, Query
@@ -18,6 +19,7 @@ from app.schemas.schedule import (
     ScheduleGenerateResponse,
     LocalReplanRequest,
     PlanVersionResponse,
+    PlanRiskReport,
     ScheduleMovePreview,
     ScheduleResponse,
     ScheduleUpdate,
@@ -74,6 +76,15 @@ def evaluate_schedules(
     }
 
 
+@router.get("/risks", response_model=PlanRiskReport)
+def get_plan_risks(
+    start: datetime,
+    end: datetime,
+    db: Session = Depends(get_db),
+):
+    return schedule_service.analyze_plan_risks(db, start, end)
+
+
 @router.post("/replan-local/preview")
 def preview_local_replan(
     payload: LocalReplanRequest,
@@ -108,6 +119,14 @@ def clear_schedules(db: Session = Depends(get_db)):
     """清空全部自动生成的日程提议。"""
 
     return schedule_service.clear_schedules(db)
+
+
+@router.delete("/task/{task_id}")
+def delete_task_schedules(
+    task_id: int,
+    db: Session = Depends(get_db),
+):
+    return schedule_service.delete_task_schedules(db, task_id)
 
 
 @router.patch("/{schedule_id}", response_model=ScheduleResponse)

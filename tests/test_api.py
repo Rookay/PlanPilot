@@ -13,6 +13,9 @@ from fastapi.testclient import TestClient
 
 from app.api import agent, events, locations, preferences, schedules, tasks
 from app.database import get_db
+from app.schemas.event import EventCreate
+from app.schemas.task import TaskCreate
+from app.services import event_service, schedule_service, task_service
 from tests.helpers import make_session
 
 
@@ -82,6 +85,16 @@ class ApiWorkflowTests(TestCase):
         )
         self.assertEqual(accept_response.json()["accepted"], 1)
 
+        risk_response = self.client.get(
+            "/api/schedules/risks",
+            params={
+                "start": "2026-09-16T00:00:00Z",
+                "end": "2026-09-18T00:00:00Z",
+            },
+        )
+        self.assertEqual(risk_response.status_code, 200, risk_response.text)
+        self.assertIn("health_score", risk_response.json())
+
     def test_agent_history_is_persisted(self):
         session_id = "api-history-test"
         response = self.client.post(
@@ -144,6 +157,35 @@ class ApiWorkflowTests(TestCase):
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["label"], "家")
         self.assertTrue(remaining[0]["is_default"])
+
+    def test_group_delete_endpoints_remove_only_the_selected_group(self):
+        grouped = event_service.create_events(
+            self.db,
+            [
+                EventCreate(
+                    title=f"连续日程 {index + 1}",
+                    start_time=datetime(2026, 9, 20, 1 + index),
+                    end_time=datetime(2026, 9, 20, 2 + index),
+                )
+                for index in range(2)
+            ],
+            trip_title="两段安排",
+        )
+        deleted_trip = self.client.delete(f"/api/events/trips/{grouped[0].trip_id}")
+        self.assertEqual(deleted_trip.status_code, 200, deleted_trip.text)
+        self.assertEqual(deleted_trip.json()["deleted"], 2)
+
+        task = task_service.create_task(self.db, TaskCreate(title="拆分任务"))
+        schedule_service.create_schedule(
+            self.db, task.id, datetime(2026, 9, 21, 1), datetime(2026, 9, 21, 2)
+        )
+        schedule_service.create_schedule(
+            self.db, task.id, datetime(2026, 9, 21, 3), datetime(2026, 9, 21, 4)
+        )
+        deleted_schedules = self.client.delete(f"/api/schedules/task/{task.id}")
+        self.assertEqual(deleted_schedules.status_code, 200, deleted_schedules.text)
+        self.assertEqual(deleted_schedules.json()["deleted"], 2)
+        self.assertIsNotNone(task_service.get_task(self.db, task.id))
 
     def test_plan_versions_lock_and_undo_work_through_api(self):
         task = self.client.post(

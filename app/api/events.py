@@ -60,6 +60,11 @@ def get_trip(trip_id: str, db: Session = Depends(get_db)):
     return event_service.get_trip_events(db, trip_id)
 
 
+@router.delete("/trips/{trip_id}")
+def delete_trip(trip_id: str, db: Session = Depends(get_db)):
+    return event_service.delete_trip(db, trip_id)
+
+
 @router.get("/{event_id}", response_model=EventResponse)
 def get_event(
     event_id: int,

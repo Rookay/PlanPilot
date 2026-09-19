@@ -267,6 +267,16 @@ class AgentLoopTests(TestCase):
         )
         self.assertEqual(repeated.name, "date_recommendation")
 
+    def test_plan_health_skill_uses_read_only_risk_tool(self):
+        skill = build_default_skills().select("看看我这周的计划有没有风险，任务来得及吗")
+
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill.name, "plan_health")
+        self.assertIn("analyze_plan_risks", skill.allowed_tools)
+        tool = build_default_registry().get("analyze_plan_risks")
+        self.assertIsNotNone(tool)
+        self.assertEqual(tool.confirmation, "none")
+
     def test_travel_itinerary_is_confirmed_and_created_as_one_batch(self):
         events = [
             {
