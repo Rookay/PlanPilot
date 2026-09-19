@@ -124,6 +124,59 @@ class ServiceTests(TestCase):
             self.db.query(Schedule).filter(Schedule.id == outside_schedule.id).first()
         )
 
+    def test_planning_mode_is_selected_and_explained(self):
+        task_service.create_task(
+            self.db,
+            TaskCreate(title="简单任务", estimated_duration=60),
+        )
+        quick = schedule_service.preview_plan(
+            self.db,
+            ScheduleGenerateRequest(
+                start=datetime(2026, 9, 16),
+                days=1,
+                planning_mode="quick",
+            ),
+        )
+        self.assertEqual(quick["analysis"]["requested_mode"], "quick")
+        self.assertEqual(quick["analysis"]["selected_mode"], "quick")
+        self.assertIn("快速安排", quick["analysis"]["selection_reason"])
+
+        optimized = schedule_service.preview_plan(
+            self.db,
+            ScheduleGenerateRequest(
+                start=datetime(2026, 9, 16),
+                days=1,
+                planning_mode="optimized",
+            ),
+        )
+        self.assertEqual(optimized["analysis"]["requested_mode"], "optimized")
+        if optimized["analysis"]["selected_mode"] == "quick":
+            self.assertTrue(optimized["analysis"]["fallback_reason"])
+        else:
+            self.assertEqual(optimized["analysis"]["selected_mode"], "optimized")
+
+    def test_auto_mode_uses_complexity_signals(self):
+        for index in range(6):
+            task_service.create_task(
+                self.db,
+                TaskCreate(title=f"任务 {index + 1}", estimated_duration=30),
+            )
+        preview = schedule_service.preview_plan(
+            self.db,
+            ScheduleGenerateRequest(
+                start=datetime(2026, 9, 16),
+                days=2,
+                planning_mode="auto",
+            ),
+        )
+        analysis = preview["analysis"]
+        self.assertEqual(analysis["requested_mode"], "auto")
+        self.assertIn(analysis["selected_mode"], ("quick", "optimized"))
+        if analysis["selected_mode"] == "optimized":
+            self.assertIn("6 项待安排任务", analysis["selection_reason"])
+        else:
+            self.assertTrue(analysis["fallback_reason"])
+
     def test_local_preferences_drive_utc_planning_and_lunch_break(self):
         preference_service.update_preferences(
             self.db,

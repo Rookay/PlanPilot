@@ -41,6 +41,8 @@ def agent_status():
         "retry_after_seconds": agent.loop.retry_after_seconds(),
         "max_iterations": agent.loop.MAX_ITERATIONS,
         "max_tool_calls": agent.loop.MAX_TOOL_CALLS,
+        "tool_call_limits": agent.loop.TOOL_CALL_LIMITS,
+        "history_message_limit": agent.loop.HISTORY_MESSAGE_LIMIT,
     }
 
 

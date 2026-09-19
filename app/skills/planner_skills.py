@@ -20,6 +20,18 @@ def build_default_skills() -> SkillRegistry:
                     "start_date/end_date 获取整个范围，禁止逐日查询。地点有省份信息时传完整省市名。"
                     "拿到日程、路线和天气后立即比较并给出首选日期、备选日期和理由，不再继续调用工具。"
                 ),
+                allowed_tools=[
+                    "get_current_time",
+                    "get_events",
+                    "get_schedules",
+                    "get_tasks",
+                    "get_preferences",
+                    "get_weather",
+                    "search_places",
+                    "geocode_address",
+                    "estimate_travel_time",
+                ],
+                priority=20,
             ),
             Skill(
                 name="task_understanding",

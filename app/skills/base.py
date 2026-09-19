@@ -13,6 +13,8 @@ class Skill:
     description: str
     keywords: List[str] = field(default_factory=list)
     system_hint: str = ""
+    allowed_tools: Optional[List[str]] = None
+    priority: int = 0
 
     def matches(self, message: str) -> bool:
         return any(keyword in message for keyword in self.keywords)
@@ -32,5 +34,11 @@ class SkillRegistry:
         for index, skill in enumerate(self._skills):
             matched = [keyword for keyword in skill.keywords if keyword in message]
             if matched:
-                ranked.append((sum(map(len, matched)), len(matched), -index, skill))
-        return max(ranked, default=(0, 0, 0, None), key=lambda item: item[:3])[3]
+                ranked.append(
+                    (skill.priority, sum(map(len, matched)), len(matched), -index, skill)
+                )
+        return max(
+            ranked,
+            default=(0, 0, 0, 0, None),
+            key=lambda item: item[:4],
+        )[4]

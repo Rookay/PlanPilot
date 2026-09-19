@@ -145,6 +145,8 @@ class Agent:
                 "status": (
                     "waiting"
                     if item.get("awaiting_confirmation") and result.confirmation.required
+                    else "warning"
+                    if item.get("limited")
                     else "completed"
                     if item.get("success")
                     else "failed"

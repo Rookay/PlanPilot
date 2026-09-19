@@ -122,6 +122,10 @@ function parseDate(value) {
     return null;
   }
 
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : new Date(value.getTime());
+  }
+
   let text = String(value);
 
   // 后端返回的是不带时区的 UTC 时间（例如 2026-09-12T10:00:00），
@@ -1407,6 +1411,25 @@ function setPlanningScope(scope) {
   renderPlanningOverview();
 }
 
+function setPlanningMode(mode) {
+  const labels = {
+    auto: "系统会根据任务数量、日期跨度、地点与约束自动选择",
+    quick: "使用现有规则引擎，适合少量任务和简单约束",
+    optimized: "使用 CP-SAT 全局求解，适合一周计划和复杂约束",
+  };
+  const input = $("planMode");
+  if (input) {
+    input.value = mode;
+  }
+  for (const name of ["auto", "quick", "optimized"]) {
+    const button = $(`planMode${name[0].toUpperCase()}${name.slice(1)}`);
+    button?.classList.toggle("active", name === mode);
+  }
+  if ($("planModeHint")) {
+    $("planModeHint").textContent = labels[mode] || labels.auto;
+  }
+}
+
 function markPlanningScopeCustom() {
   if (state.planningScope !== "custom") {
     state.planningScope = "custom";
@@ -1488,7 +1511,10 @@ async function generateSchedule() {
 
 function collectPlanPayload() {
   const startValue = $("planStart").value;
-  const payload = { days: Number($("planDays").value) || 7 };
+  const payload = {
+    days: Number($("planDays").value) || 7,
+    planning_mode: $("planMode")?.value || "auto",
+  };
   const gapValue = $("planGap").value;
   const strategy = $("planStrategy").value;
   if (gapValue !== "") {
@@ -1588,12 +1614,21 @@ function renderPlanAnalysis(analysis, title = "计划分析") {
   }
   const hours = ((analysis.scheduled_minutes || 0) / 60).toFixed(1);
   const issues = analysis.issues || [];
+  const modeLabel = analysis.selected_mode === "optimized" ? "深度优化" : "快速安排";
+  const modeNote = analysis.selection_reason
+    ? `<div class="analysis-engine"><strong>${modeLabel}</strong><span>${escapeHtml(analysis.selection_reason)}</span></div>`
+    : "";
+  const fallbackNote = analysis.fallback_reason
+    ? `<p class="analysis-fallback">深度优化暂未启用：${escapeHtml(analysis.fallback_reason)}</p>`
+    : "";
   container.classList.remove("hidden");
   container.innerHTML = `
     <div class="score-ring"><strong>${escapeHtml(analysis.score ?? 0)}</strong><span>分</span></div>
     <div class="analysis-copy">
       <h3>${escapeHtml(title)}</h3>
       <p>已安排 ${escapeHtml(analysis.scheduled_count || 0)} 项，共 ${escapeHtml(hours)} 小时；未安排 ${escapeHtml(analysis.unscheduled_count || 0)} 项。</p>
+      ${modeNote}
+      ${fallbackNote}
       ${issues.length ? `<ul>${issues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : `<p class="analysis-good">当前计划没有明显风险。</p>`}
     </div>
   `;
@@ -1754,6 +1789,7 @@ async function previewLocalReplan() {
     start: start.toISOString(),
     end: end.toISOString(),
     include_unscheduled: true,
+    planning_mode: $("planMode")?.value || "auto",
   };
   const gapValue = $("planGap").value;
   const strategy = $("planStrategy").value;

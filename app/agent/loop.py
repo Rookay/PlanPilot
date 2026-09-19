@@ -46,6 +46,22 @@ class AgentResult:
 class AgentLoop:
     MAX_ITERATIONS = 12
     MAX_TOOL_CALLS = 24
+    HISTORY_MESSAGE_LIMIT = 10
+    HISTORY_CONTENT_LIMIT = 1800
+    TOOL_CALL_LIMITS = {
+        "get_weather": 3,
+        "get_events": 3,
+        "get_tasks": 3,
+        "get_schedules": 3,
+        "generate_plan": 2,
+        "replan": 2,
+        "replan_local": 2,
+        "check_conflicts": 1,
+        "evaluate_plan": 1,
+        "search_places": 8,
+        "geocode_address": 8,
+        "estimate_travel_time": 12,
+    }
     FALLBACK_COOLDOWN_SECONDS = 15
 
     def __init__(
@@ -69,14 +85,27 @@ class AgentLoop:
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
         self.memory.add(session_id, "user", message)
 
-        messages = self._build_messages(db, session_id, message)
+        selected_skill = (
+            self.skill_registry.select(message)
+            if self.skill_registry is not None
+            else None
+        )
+        active_tool_names = (
+            set(selected_skill.allowed_tools)
+            if selected_skill is not None and selected_skill.allowed_tools is not None
+            else None
+        )
+        messages = self._build_messages(db, session_id, message, selected_skill)
 
         tool_call_log: List[dict] = []
         applied_changes: List[dict] = []
         proposed_schedules: List[dict] = []
         tool_call_count = 0
         seen_calls: set[str] = set()
+        tool_call_counts: dict[str, int] = {}
+        saturated_tools: set[str] = set()
         model_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        provider = self.llm
 
         for _ in range(self.MAX_ITERATIONS):
             try:
@@ -86,7 +115,13 @@ class AgentLoop:
                     else self.llm
                 )
                 self.last_run_provider = provider.__class__.__name__
-                response = provider.chat(messages, tools=self.registry.schemas())
+                response = provider.chat(
+                    messages,
+                    tools=self._available_tool_schemas(
+                        saturated_tools,
+                        active_tool_names,
+                    ),
+                )
                 if provider is self.llm:
                     self.mark_provider_available()
             except Exception as exc:  # noqa: BLE001
@@ -102,7 +137,11 @@ class AgentLoop:
                     }
                 )
                 response = self.fallback_provider.chat(
-                    messages, tools=self.registry.schemas()
+                    messages,
+                    tools=self._available_tool_schemas(
+                        saturated_tools,
+                        active_tool_names,
+                    ),
                 )
 
             self._merge_usage(model_usage, response.usage)
@@ -147,17 +186,51 @@ class AgentLoop:
                     continue
 
                 if call_key in seen_calls:
-                    reply = self._progress_reply(tool_call_log, proposed_schedules)
-                    self.memory.add(session_id, "assistant", reply)
-                    return AgentResult(
-                        reply=reply,
-                        session_id=session_id,
-                        tool_calls=tool_call_log,
-                        applied_changes=applied_changes,
-                        proposed_schedules=proposed_schedules,
-                        model_usage=model_usage,
+                    saturated_tools.add(call.name)
+                    error = "同一工具参数已经执行过，请根据已有结果直接作答"
+                    messages.append(
+                        self._tool_message(call.id, call.name, False, error=error)
                     )
+                    tool_call_log.append(
+                        {
+                            "stage": self._tool_stage(call.name),
+                            "name": call.name,
+                            "arguments": call.arguments,
+                            "success": False,
+                            "limited": True,
+                            "summary": error,
+                            "duration_ms": 0,
+                        }
+                    )
+                    continue
                 seen_calls.add(call_key)
+
+                call_limit = self.TOOL_CALL_LIMITS.get(call.name)
+                previous_calls = tool_call_counts.get(call.name, 0)
+                if call_limit is not None and previous_calls >= call_limit:
+                    saturated_tools.add(call.name)
+                    error = (
+                        f"{call.name} 已达到本轮 {call_limit} 次调用上限；"
+                        "请使用已有结果完成回答"
+                    )
+                    messages.append(
+                        self._tool_message(call.id, call.name, False, error=error)
+                    )
+                    tool_call_log.append(
+                        {
+                            "stage": self._tool_stage(call.name),
+                            "name": call.name,
+                            "arguments": call.arguments,
+                            "success": False,
+                            "limited": True,
+                            "summary": error,
+                            "duration_ms": 0,
+                        }
+                    )
+                    continue
+                tool_call_counts[call.name] = previous_calls + 1
+                if call_limit is not None and previous_calls + 1 >= call_limit:
+                    saturated_tools.add(call.name)
 
                 # confirm 级别：收集同一轮的全部变更，稍后合并成一次确认。
                 if tool.confirmation == "confirm":
@@ -292,7 +365,13 @@ class AgentLoop:
                 )
 
             if tool_call_count >= self.MAX_TOOL_CALLS:
-                reply = self._progress_reply(tool_call_log, proposed_schedules)
+                reply = self._finalize_without_tools(
+                    provider,
+                    messages,
+                    tool_call_log,
+                    proposed_schedules,
+                    model_usage,
+                )
                 self.memory.add(session_id, "assistant", reply)
                 return AgentResult(
                     reply=reply,
@@ -303,7 +382,13 @@ class AgentLoop:
                     model_usage=model_usage,
                 )
 
-        reply = self._progress_reply(tool_call_log, proposed_schedules)
+        reply = self._finalize_without_tools(
+            provider,
+            messages,
+            tool_call_log,
+            proposed_schedules,
+            model_usage,
+        )
         self.memory.add(session_id, "assistant", reply)
         return AgentResult(
             reply=reply,
@@ -331,21 +416,88 @@ class AgentLoop:
 
     # ------------------------------------------------------------------
 
-    def _build_messages(self, db: Session, session_id: str, message: str) -> List[dict]:
+    def _build_messages(
+        self,
+        db: Session,
+        session_id: str,
+        message: str,
+        selected_skill=None,
+    ) -> List[dict]:
         timezone = self.memory.get_preferences(db).get("timezone", "Asia/Shanghai")
 
         system = build_system_prompt(timezone)
 
-        if self.skill_registry is not None:
-            skill = self.skill_registry.select(message)
-            if skill is not None:
-                system += "\n\n" + skill.system_hint
+        if selected_skill is None and self.skill_registry is not None:
+            selected_skill = self.skill_registry.select(message)
+        if selected_skill is not None:
+            system += "\n\n" + selected_skill.system_hint
 
         system += "\n\n当前数据快照：\n" + build_world_summary(db, timezone)
 
         messages: List[dict] = [{"role": "system", "content": system}]
-        messages.extend(self.memory.recent(session_id))
+        messages.extend(
+            self._compact_history(
+                self.memory.recent(session_id, limit=self.HISTORY_MESSAGE_LIMIT)
+            )
+        )
         return messages
+
+    def _available_tool_schemas(
+        self,
+        saturated_tools: set[str],
+        active_tool_names: Optional[set[str]] = None,
+    ) -> List[dict]:
+        return [
+            schema
+            for schema in self.registry.schemas()
+            if schema.get("function", {}).get("name") not in saturated_tools
+            and (
+                active_tool_names is None
+                or schema.get("function", {}).get("name") in active_tool_names
+            )
+        ]
+
+    def _compact_history(self, messages: List[dict]) -> List[dict]:
+        compacted = []
+        for message in messages:
+            item = dict(message)
+            content = item.get("content")
+            if isinstance(content, str) and len(content) > self.HISTORY_CONTENT_LIMIT:
+                tail_length = min(300, self.HISTORY_CONTENT_LIMIT // 4)
+                head_length = self.HISTORY_CONTENT_LIMIT - tail_length
+                item["content"] = (
+                    content[:head_length]
+                    + "\n...[较长历史内容已压缩]...\n"
+                    + content[-tail_length:]
+                )
+            compacted.append(item)
+        return compacted
+
+    def _finalize_without_tools(
+        self,
+        provider,
+        messages: List[dict],
+        tool_call_log: List[dict],
+        proposed_schedules: List[dict],
+        model_usage: dict,
+    ) -> str:
+        final_messages = messages + [
+            {
+                "role": "system",
+                "content": (
+                    "工具调用阶段已经结束。禁止继续调用任何工具；请仅根据已有工具结果，"
+                    "用简体中文给出简洁结论。若信息不完整，明确指出缺失项并给出当前可判断的结果。"
+                ),
+            }
+        ]
+        try:
+            response = provider.chat(final_messages, tools=None)
+            self._merge_usage(model_usage, response.usage)
+            if response.is_text() and response.text:
+                return response.text
+        except Exception:  # noqa: BLE001 - 最终总结失败时仍返回确定性结果
+            pass
+        return self._progress_reply(tool_call_log, proposed_schedules)
 
     def _assistant_message(self, response) -> dict:
         if response.raw_message is not None:
@@ -453,10 +605,42 @@ class AgentLoop:
                 {
                     "success": success,
                     "summary": summary,
-                    "data": data,
+                    "data": _compact_tool_payload(data),
                     "error": error,
                 },
                 ensure_ascii=False,
                 default=str,
             ),
         }
+
+
+def _compact_tool_payload(value, key: str = "", depth: int = 0):
+    """Keep decision-relevant tool output while dropping token-heavy detail."""
+
+    if depth >= 7:
+        return "[嵌套内容已省略]"
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {
+            item_key: _compact_tool_payload(item_value, item_key, depth + 1)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        if key == "path":
+            return {
+                "point_count": len(value),
+                "start": _compact_tool_payload(value[0], depth=depth + 1) if value else None,
+                "end": _compact_tool_payload(value[-1], depth=depth + 1) if value else None,
+            }
+        limit = 8 if key == "steps" else 30
+        items = [
+            _compact_tool_payload(item, depth=depth + 1)
+            for item in value[:limit]
+        ]
+        if len(value) > limit:
+            items.append({"omitted_count": len(value) - limit})
+        return items
+    if isinstance(value, str) and len(value) > 1200:
+        return value[:1000] + "...[内容已压缩]..." + value[-120:]
+    return value

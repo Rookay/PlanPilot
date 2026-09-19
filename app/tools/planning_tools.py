@@ -35,6 +35,7 @@ def _build_generate_payload(kwargs: dict) -> ScheduleGenerateRequest:
         windows=windows,
         gap_minutes=int(gap) if gap is not None else None,
         strategy=kwargs.get("strategy"),
+        planning_mode=kwargs.get("planning_mode", "auto"),
     )
 
 
@@ -72,6 +73,11 @@ class GeneratePlanTool(Tool):
                 "type": "string",
                 "enum": ["balanced", "deadline_first", "priority_first"],
                 "description": "规划排序策略",
+            },
+            "planning_mode": {
+                "type": "string",
+                "enum": ["auto", "quick", "optimized"],
+                "description": "规划方式：自动选择、快速安排或深度优化",
             },
         },
         "required": [],
@@ -176,6 +182,10 @@ class EvaluatePlanTool(Tool):
                 "type": "string",
                 "enum": ["balanced", "deadline_first", "priority_first"],
             },
+            "planning_mode": {
+                "type": "string",
+                "enum": ["auto", "quick", "optimized"],
+            },
         },
         "required": [],
         "additionalProperties": False,
@@ -231,6 +241,10 @@ class ReplanTool(Tool):
                 "type": "string",
                 "enum": ["balanced", "deadline_first", "priority_first"],
             },
+            "planning_mode": {
+                "type": "string",
+                "enum": ["auto", "quick", "optimized"],
+            },
         },
         "required": [],
         "additionalProperties": False,
@@ -272,6 +286,10 @@ class LocalReplanTool(Tool):
                 "type": "string",
                 "enum": ["balanced", "deadline_first", "priority_first"],
             },
+            "planning_mode": {
+                "type": "string",
+                "enum": ["auto", "quick", "optimized"],
+            },
             "include_unscheduled": {"type": "boolean"},
         },
         "required": ["start", "end"],
@@ -287,6 +305,7 @@ class LocalReplanTool(Tool):
             end=parse_naive_utc(kwargs.get("end")),
             gap_minutes=kwargs.get("gap_minutes"),
             strategy=kwargs.get("strategy"),
+            planning_mode=kwargs.get("planning_mode", "auto"),
             include_unscheduled=bool(kwargs.get("include_unscheduled", False)),
         )
 

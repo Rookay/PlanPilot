@@ -3464,6 +3464,61 @@ textarea:focus-visible,
     margin-bottom: 12px;
 }
 
+.planning-mode-field {
+    display: grid;
+    min-width: 100%;
+    grid-template-columns: auto minmax(260px, 390px) 1fr;
+    align-items: center;
+    gap: 10px 14px;
+    padding-bottom: 13px;
+    border-bottom: 1px solid var(--line);
+}
+
+.planning-mode-field > span {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.planning-mode-field small {
+    min-width: 0;
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.planning-mode-control {
+    width: 100%;
+    grid-template-columns: repeat(3, minmax(72px, 1fr));
+}
+
+.analysis-engine {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 9px 0;
+}
+
+.analysis-engine strong {
+    flex: 0 0 auto;
+    padding: 4px 7px;
+    border-radius: 5px;
+    background: #e8f3ef;
+    color: #176c58;
+    font-size: 10px;
+}
+
+.analysis-engine span,
+.analysis-fallback {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.analysis-fallback {
+    margin: 7px 0;
+    color: #865817;
+}
+
 .segmented-control {
     display: inline-grid;
     grid-template-columns: repeat(3, minmax(64px, 1fr));
@@ -3691,6 +3746,14 @@ textarea:focus-visible,
 }
 
 @media (max-width: 620px) {
+    .planning-mode-field {
+        grid-template-columns: 1fr;
+    }
+
+    .planning-mode-field small {
+        min-height: 34px;
+    }
+
     .planning-overview {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }

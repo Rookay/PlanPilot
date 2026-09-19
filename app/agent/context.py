@@ -58,7 +58,7 @@ def build_system_prompt(timezone: str = "Asia/Shanghai") -> str:
     )
 
 
-def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int = 20) -> str:
+def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int = 12) -> str:
     """构建当前世界的紧凑快照。"""
 
     now = utcnow()
@@ -72,8 +72,23 @@ def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int
         .limit(limit)
         .all()
     )
-    events = db.query(Event).order_by(Event.start_time).limit(limit).all()
-    schedules = db.query(Schedule).order_by(Schedule.start_time).limit(limit).all()
+    events = (
+        db.query(Event)
+        .filter(Event.end_time >= now)
+        .order_by(Event.start_time)
+        .limit(limit)
+        .all()
+    )
+    schedules = (
+        db.query(Schedule)
+        .filter(
+            Schedule.end_time >= now,
+            Schedule.status.in_(["proposed", "accepted"]),
+        )
+        .order_by(Schedule.start_time)
+        .limit(limit)
+        .all()
+    )
 
     lines = [
         f"当前时间：UTC {now.isoformat()} | 本地({timezone}) {local.isoformat()}（UTC{offset:+d}）"
@@ -116,7 +131,7 @@ def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int
     else:
         lines.append("- （无）")
 
-    lines.append("\n固定事件：")
+    lines.append("\n近期固定日程：")
     if events:
         for event in events:
             event_location = location_names.get(event.location_id) or event.location or "无"
@@ -149,7 +164,7 @@ def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int
     else:
         lines.append("- （无）")
 
-    lines.append("\n已有日程：")
+    lines.append("\n近期任务安排：")
     if schedules:
         for schedule in schedules:
             lines.append(

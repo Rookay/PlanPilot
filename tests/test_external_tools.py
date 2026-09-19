@@ -1,13 +1,26 @@
+import urllib.error
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.schemas.location import SavedLocationCreate
 from app.services import location_service
-from app.tools.external_tools import GetWeatherTool
+from app.tools.external_tools import GetWeatherTool, _get_json
 from tests.helpers import make_session
 
 
 class ExternalToolTests(TestCase):
+    def test_external_json_request_retries_one_transient_failure(self):
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"ok": true}'
+        with patch(
+            "app.tools.external_tools.urllib.request.urlopen",
+            side_effect=[urllib.error.URLError("temporary"), response],
+        ) as urlopen, patch("app.tools.external_tools.time.sleep"):
+            payload = _get_json("https://example.test/weather")
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(urlopen.call_count, 2)
+
     def test_weather_tool_returns_structured_forecast(self):
         db = make_session()
         responses = [

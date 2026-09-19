@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from unittest import TestCase
 from unittest.mock import patch
@@ -56,6 +57,73 @@ class AgentLoopTests(TestCase):
         self.assertEqual(paper.priority, "high")
         self.assertTrue(result.proposed_schedules)
         self.assertNotIn("最大", result.reply)
+
+    def test_iteration_limit_uses_one_tool_free_final_summary(self):
+        class OneIterationLoop(AgentLoop):
+            MAX_ITERATIONS = 1
+
+        provider = MockProvider(
+            script=[
+                {
+                    "tool_calls": [
+                        {"name": "get_current_time", "arguments": {}}
+                    ]
+                },
+                {"text": "已根据当前时间完成总结。"},
+            ]
+        )
+        loop = OneIterationLoop(
+            llm=provider,
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=PendingActionStore(),
+            skill_registry=build_default_skills(),
+        )
+
+        result = loop.run(self.db, "现在适合做什么", "limit-summary")
+
+        self.assertEqual(result.reply, "已根据当前时间完成总结。")
+        self.assertEqual([item["name"] for item in result.tool_calls], ["get_current_time"])
+
+    def test_agent_compacts_history_and_route_geometry(self):
+        loop = AgentLoop(
+            llm=MockProvider(),
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=PendingActionStore(),
+        )
+        compacted = loop._compact_history(
+            [{"role": "assistant", "content": "A" * 3000}]
+        )
+        self.assertLess(len(compacted[0]["content"]), 1900)
+        self.assertIn("较长历史内容已压缩", compacted[0]["content"])
+
+        message = loop._tool_message(
+            "route-call",
+            "estimate_travel_time",
+            True,
+            data={"routes": [{"path": [{"longitude": index} for index in range(100)]}]},
+        )
+        payload = json.loads(message["content"])
+        path = payload["data"]["routes"][0]["path"]
+        self.assertEqual(path["point_count"], 100)
+        self.assertEqual(path["start"]["longitude"], 0)
+        self.assertEqual(path["end"]["longitude"], 99)
+
+    def test_saturated_tool_is_removed_from_next_model_turn(self):
+        loop = AgentLoop(
+            llm=MockProvider(),
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=PendingActionStore(),
+        )
+
+        schemas = loop._available_tool_schemas({"get_weather", "get_events"})
+        names = {item["function"]["name"] for item in schemas}
+
+        self.assertNotIn("get_weather", names)
+        self.assertNotIn("get_events", names)
+        self.assertIn("get_current_time", names)
 
     def test_batch_event_delete_requires_only_one_confirmation(self):
         events = [
@@ -191,6 +259,13 @@ class AgentLoopTests(TestCase):
         self.assertIsNotNone(skill)
         self.assertEqual(skill.name, "date_recommendation")
         self.assertIn("禁止逐日查询", skill.system_hint)
+        self.assertIn("get_weather", skill.allowed_tools)
+        self.assertNotIn("generate_plan", skill.allowed_tools)
+
+        repeated = build_default_skills().select(
+            "下周我想开车回家，哪天比较合适，重新安排，不参考之前的"
+        )
+        self.assertEqual(repeated.name, "date_recommendation")
 
     def test_travel_itinerary_is_confirmed_and_created_as_one_batch(self):
         events = [

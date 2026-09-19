@@ -380,6 +380,17 @@
             </div>
 
             <div class="planning-actions">
+                <div class="planning-mode-field">
+                    <span>规划方式</span>
+                    <input id="planMode" type="hidden" value="auto">
+                    <div class="segmented-control planning-mode-control" role="group" aria-label="规划方式">
+                        <button id="planModeAuto" class="active" type="button" title="根据任务复杂度自动选择" onclick="setPlanningMode('auto')">自动</button>
+                        <button id="planModeQuick" type="button" title="使用确定性规则快速生成安排" onclick="setPlanningMode('quick')">快速</button>
+                        <button id="planModeOptimized" type="button" title="使用 CP-SAT 进行全局优化" onclick="setPlanningMode('optimized')">深度优化</button>
+                    </div>
+                    <small id="planModeHint">系统会根据任务数量、日期跨度、地点与约束自动选择</small>
+                </div>
+
                 <label>
                     起始时间
                     <input id="planStart" type="datetime-local" onchange="markPlanningScopeCustom()">

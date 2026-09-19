@@ -29,6 +29,7 @@ from app.planning.engine import (
     find_free_slots as engine_find_free_slots,
     generate_plan,
 )
+from app.planning import optimizer
 from app.planning.windows import (
     build_local_work_windows,
     lunch_intervals,
@@ -68,6 +69,10 @@ class PlanningContext:
     gap_minutes: int
     strategy: str
     travel_checker: TravelConstraintChecker
+    requested_mode: str = "auto"
+    selected_mode: str = "quick"
+    selection_reason: str = ""
+    fallback_reason: Optional[str] = None
 
 
 def list_schedules(db: Session) -> List[Schedule]:
@@ -735,14 +740,17 @@ def _build_context(
         ),
         strategy=payload.strategy or prefs.planning_strategy,
         travel_checker=travel_checker,
+        requested_mode=payload.planning_mode,
     )
 
 
 def _run_plan(context: PlanningContext) -> PlanResult:
     try:
-        result = generate_plan(
+        selected_mode, reason = _select_planning_mode(context)
+        context.selected_mode = selected_mode
+        context.selection_reason = reason
+        planner_kwargs = dict(
             start=context.start,
-            days=context.days,
             tasks=context.tasks,
             busy_intervals=context.busy,
             scheduled_task_ids=context.scheduled_task_ids,
@@ -753,6 +761,16 @@ def _run_plan(context: PlanningContext) -> PlanResult:
             strategy=context.strategy,
             candidate_validator=context.travel_checker.validate_candidate,
         )
+        if selected_mode == "optimized":
+            try:
+                result = optimizer.generate_optimized_plan(**planner_kwargs)
+            except RuntimeError as exc:
+                context.selected_mode = "quick"
+                context.fallback_reason = str(exc)
+                context.selection_reason = "深度优化不可用，已自动切换为快速安排"
+                result = generate_plan(days=context.days, **planner_kwargs)
+        else:
+            result = generate_plan(days=context.days, **planner_kwargs)
         for failure in result.failures:
             reason = context.travel_checker.rejection_reasons.get(failure.task_id)
             if reason:
@@ -763,6 +781,45 @@ def _run_plan(context: PlanningContext) -> PlanResult:
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _select_planning_mode(context: PlanningContext) -> tuple[str, str]:
+    """Choose the planner explicitly or from observable request complexity."""
+
+    if context.requested_mode == "quick":
+        return "quick", "已按你的选择使用快速安排"
+    if context.requested_mode == "optimized":
+        return "optimized", "已按你的选择进行全局深度优化"
+
+    tasks = context.tasks
+    location_count = len(
+        {
+            location.key
+            for task in tasks
+            if (location := context.travel_checker.task_locations.get(task.id)) is not None
+        }
+    )
+    deadline_count = sum(task.deadline is not None for task in tasks)
+    dependency_count = sum(bool(task.dependency_ids) for task in tasks)
+    span_days = max(
+        1,
+        (context.windows[-1][1].date() - context.windows[0][0].date()).days + 1,
+    )
+    reasons = []
+    if len(tasks) >= 6:
+        reasons.append(f"{len(tasks)} 项待安排任务")
+    if span_days >= 3 and len(tasks) >= 3:
+        reasons.append(f"规划范围跨 {span_days} 天")
+    if deadline_count >= 2:
+        reasons.append(f"{deadline_count} 个截止时间")
+    if location_count >= 3:
+        reasons.append(f"涉及 {location_count} 个地点")
+    if dependency_count >= 2:
+        reasons.append(f"{dependency_count} 项前置依赖")
+
+    if reasons:
+        return "optimized", "；".join(reasons)
+    return "quick", "任务与约束较少，快速安排即可得到稳定结果"
 
 
 def _plan_tasks(
@@ -984,6 +1041,7 @@ def _prepare_local_replan(
         windows=[{"start": start, "end": end}],
         gap_minutes=payload.gap_minutes,
         strategy=payload.strategy,
+        planning_mode=payload.planning_mode,
     )
     context = _build_context(
         db,
@@ -1147,6 +1205,10 @@ def _analysis(result: PlanResult, context: PlanningContext) -> PlanAnalysis:
         unscheduled_count=evaluation.unscheduled_count,
         scheduled_minutes=evaluation.scheduled_minutes,
         issues=list(dict.fromkeys(issues)),
+        requested_mode=context.requested_mode,
+        selected_mode=context.selected_mode,
+        selection_reason=context.selection_reason,
+        fallback_reason=context.fallback_reason,
     )
 
 

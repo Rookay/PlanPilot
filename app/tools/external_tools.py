@@ -4,6 +4,7 @@
 """时间与天气等外部工具。"""
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -386,12 +387,18 @@ def _get_json(url: str) -> dict:
         url,
         headers={"User-Agent": "PlanPilot/1.0"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {detail[:160]}") from exc
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {exc.code}: {detail[:160]}") from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt:
+                raise
+            time.sleep(0.15)
+    raise RuntimeError("外部服务未返回数据")
 
 
 def _weather_label(code: int | float | None) -> str:

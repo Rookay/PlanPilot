@@ -2,9 +2,47 @@ from datetime import datetime, timedelta
 from unittest import TestCase
 
 from app.planning.engine import PlanTask, generate_plan
+from app.planning.optimizer import generate_optimized_plan, is_cp_sat_available
 
 
 class PlanningEngineTests(TestCase):
+    def test_cp_sat_finds_global_order_that_greedy_misses(self):
+        if not is_cp_sat_available():
+            self.skipTest("OR-Tools is not installed")
+        start = datetime(2026, 9, 21, 9)
+        tasks = [
+            PlanTask(id=1, title="长任务", estimated_duration=120, priority="high"),
+            PlanTask(
+                id=2,
+                title="临近截止任务",
+                estimated_duration=60,
+                priority="medium",
+                deadline=datetime(2026, 9, 21, 10),
+            ),
+        ]
+        greedy = generate_plan(
+            start=start,
+            days=1,
+            tasks=tasks,
+            busy_intervals=[],
+            scheduled_task_ids=set(),
+            windows=[(start, datetime(2026, 9, 21, 12))],
+        )
+        optimized = generate_optimized_plan(
+            start=start,
+            tasks=tasks,
+            busy_intervals=[],
+            scheduled_task_ids=set(),
+            completed_task_ids=set(),
+            dependency_completion_times={},
+            windows=[(start, datetime(2026, 9, 21, 12))],
+            gap_minutes=0,
+            strategy="balanced",
+        )
+
+        self.assertEqual(len(greedy.assignments), 1)
+        self.assertEqual(len(optimized.assignments), 2)
+        self.assertEqual(optimized.assignments[0].task_id, 2)
     def test_priority_gap_and_preferred_window(self):
         start = datetime(2026, 9, 16, 1, 0)
         tasks = [

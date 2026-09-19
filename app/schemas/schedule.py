@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ScheduleStatus = Literal["proposed", "accepted", "completed", "cancelled"]
 PlanningStrategy = Literal["balanced", "deadline_first", "priority_first"]
+PlanningMode = Literal["auto", "quick", "optimized"]
 
 
 class ScheduleBase(BaseModel):
@@ -74,6 +75,8 @@ class ScheduleGenerateRequest(BaseModel):
     gap_minutes: Optional[int] = Field(default=None, ge=0, le=240)
     #: 排序策略；缺省时读取用户偏好。
     strategy: Optional[PlanningStrategy] = None
+    #: 规划引擎选择；auto 会按任务复杂度自动判断。
+    planning_mode: PlanningMode = "auto"
 
 
 class UnscheduledTask(BaseModel):
@@ -88,6 +91,10 @@ class PlanAnalysis(BaseModel):
     unscheduled_count: int = 0
     scheduled_minutes: int = 0
     issues: List[str] = Field(default_factory=list)
+    requested_mode: PlanningMode = "auto"
+    selected_mode: Literal["quick", "optimized"] = "quick"
+    selection_reason: str = ""
+    fallback_reason: Optional[str] = None
 
 
 class ScheduleGenerateResponse(BaseModel):
@@ -103,6 +110,7 @@ class LocalReplanRequest(BaseModel):
     end: datetime
     gap_minutes: Optional[int] = Field(default=None, ge=0, le=240)
     strategy: Optional[PlanningStrategy] = None
+    planning_mode: PlanningMode = "auto"
     include_unscheduled: bool = False
 
     @model_validator(mode="after")
