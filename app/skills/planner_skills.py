@@ -10,6 +10,18 @@ def build_default_skills() -> SkillRegistry:
     registry = SkillRegistry(
         [
             Skill(
+                name="date_recommendation",
+                description="比较一段日期并推荐最合适的出行或办事时间",
+                keywords=["哪天", "什么时候合适", "哪一天", "适合哪天"],
+                system_hint=(
+                    "【日期推荐】这是比较候选日期，不是创建日程。先用 get_current_time 确定日期范围，"
+                    "再用 get_events 且必须传 start/end，只读取目标范围；路线通常只调用一次 "
+                    "estimate_travel_time。需要天气时，对每个相关城市各调用一次 get_weather，并使用 "
+                    "start_date/end_date 获取整个范围，禁止逐日查询。地点有省份信息时传完整省市名。"
+                    "拿到日程、路线和天气后立即比较并给出首选日期、备选日期和理由，不再继续调用工具。"
+                ),
+            ),
+            Skill(
                 name="task_understanding",
                 description="把自然语言需求转换为结构化任务",
                 keywords=["要做", "需要完成", "添加任务", "新建任务", "创建任务", "记得"],
@@ -47,7 +59,8 @@ def build_default_skills() -> SkillRegistry:
                 description="结合天气调整日程",
                 keywords=["天气", "下雨", "下雪", "高温", "降温", "户外"],
                 system_hint=(
-                    "【天气规划】先用 get_current_time 确定日期，再调用 get_weather 获取真实天气。"
+                    "【天气规划】先用 get_current_time 确定日期；比较多天时调用一次 get_weather，"
+                    "通过 start_date/end_date 获取完整范围，禁止逐日查询。"
                     "随后查询任务和日程；如果天气会影响户外安排，解释影响并在需要时调用 replan。"
                 ),
             ),

@@ -22,6 +22,7 @@ from app.schemas.itinerary import (
     ItineraryLeg,
     ItineraryLocation,
     ItineraryMode,
+    ItineraryOriginStrategy,
 )
 from app.schemas.event import TravelMode as EventTravelMode
 from app.services import location_service, preference_service
@@ -35,6 +36,9 @@ def get_daily_itinerary(
     include_return: bool = False,
     car_available: bool = False,
     parking_minutes: int = 10,
+    origin_strategy: ItineraryOriginStrategy = "default",
+    origin_location_id: Optional[int] = None,
+    destination_location_id: Optional[int] = None,
 ) -> DailyItineraryResponse:
     preferences = preference_service.get_preferences(db)
     day_start, day_end = _utc_day_bounds(target_date, preferences.timezone)
@@ -120,7 +124,20 @@ def get_daily_itinerary(
     items.sort(key=lambda item: (item.start_time, item.end_time, item.id))
 
     default = next((item for item in locations.values() if item.is_default), None)
-    origin = _location_model(default)
+    selected_origin = (
+        location_service.get_location(db, origin_location_id)
+        if origin_location_id is not None
+        else None
+    )
+    if selected_origin is not None:
+        origin = _location_model(selected_origin)
+        effective_origin_strategy: ItineraryOriginStrategy = "selected"
+    elif origin_strategy == "default":
+        origin = _location_model(default)
+        effective_origin_strategy = "default"
+    else:
+        origin = _automatic_origin(items)
+        effective_origin_strategy = "automatic"
 
     # 旧赶路事件没有独立出发地时，按时间线继承上一事项地点。
     previous_location = origin
@@ -178,29 +195,38 @@ def get_daily_itinerary(
         previous_location = item.location
         previous_item = item
 
+    endpoint_location = (
+        _location_model(location_service.get_location(db, destination_location_id))
+        if destination_location_id is not None
+        else origin if include_return else None
+    )
     if (
-        include_return
+        endpoint_location
         and items
         and items[-1].location
-        and origin
-        and items[-1].location.coordinate != origin.coordinate
+        and items[-1].location.coordinate != endpoint_location.coordinate
     ):
         last = items[-1]
-        destination = ItineraryItem(
-            id="origin-return",
+        endpoint_id = (
+            "origin-return"
+            if include_return and destination_location_id is None
+            else "trip-end"
+        )
+        endpoint_item = ItineraryItem(
+            id=endpoint_id,
             kind="event",
-            source_id=origin.id,
-            title=f"返回{origin.label}",
+            source_id=endpoint_location.id or 0,
+            title=f"前往{endpoint_location.label}",
             start_time=last.end_time,
             end_time=last.end_time,
-            status="return",
-            location=origin,
+            status="endpoint",
+            location=endpoint_location,
         )
         requests.append(
             _LegRequest(
                 origin_id=last.id,
                 origin=last.location,
-                destination=destination,
+                destination=endpoint_item,
                 departure_base=last.end_time,
                 is_return=True,
             )
@@ -265,12 +291,25 @@ def get_daily_itinerary(
         include_return=include_return,
         car_available=effective_car_available,
         parking_minutes=parking_minutes,
+        origin_strategy=effective_origin_strategy,
         origin=origin,
+        destination=endpoint_location,
         items=items,
         legs=legs,
         warnings=warnings,
         map_message=map_message,
     )
+
+
+def _automatic_origin(items: List[ItineraryItem]) -> Optional[ItineraryLocation]:
+    """从当天第一项有地点的安排推断起点，不再隐式使用默认地点。"""
+
+    for item in items:
+        if item.event_type == "travel":
+            return item.origin_location
+        if item.location is not None:
+            return item.location
+    return None
 
 
 @dataclass(frozen=True)

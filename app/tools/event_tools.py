@@ -12,7 +12,7 @@ from app.integrations.maps.service import get_map_service
 from app.models.event import Event
 from app.models.schedule import Schedule
 from app.schemas.event import EventCreate, EventSeriesCreate, EventUpdate, TripRevision
-from app.services import event_service
+from app.services import event_service, time_policy
 from app.services.travel_planning_service import (
     LocatedBlock,
     PlanningLocation,
@@ -25,7 +25,7 @@ from app.utils import parse_naive_utc
 
 class GetEventsTool(Tool):
     name = "get_events"
-    description = "查询固定行程（不可移动的外部约束，如会议、预约、车次），可限定时间范围。"
+    description = "查询固定日程（不可移动的外部约束，如会议、预约、车次），可限定时间范围。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -73,7 +73,7 @@ class GetEventTool(Tool):
 
 class GetTripsTool(Tool):
     name = "get_trips"
-    description = "查询由多段事件组成的旅行行程组，用于后续整体顺延或局部调整。"
+    description = "查询由多段固定事件组成的日程组，用于后续整体顺延或局部调整。"
     input_schema = {
         "type": "object",
         "properties": {},
@@ -94,7 +94,7 @@ class GetTripsTool(Tool):
 
 class CreateEventTool(Tool):
     name = "create_event"
-    description = "创建时间已经确定、不可被规划引擎移动的固定行程，如会议、预约、车次。"
+    description = "创建时间已经确定、不可被规划引擎移动的固定日程，如会议、预约、车次。"
     input_schema = {
         "type": "object",
         "properties": {
@@ -182,8 +182,8 @@ class CreateEventTool(Tool):
 class CreateEventsTool(Tool):
     name = "create_events"
     description = (
-        "一次性创建一组按时间排列的固定行程，并在执行前让用户统一确认。"
-        "明确日期的旅行、游玩、接站等多地点日程必须使用本工具；"
+        "一次性创建一组按时间排列的固定日程，并在执行前让用户统一确认。"
+        "明确日期且需要统一确认的多地点连续日程必须使用本工具；"
         "赶路段用 event_type=travel，并填写与路线查询一致的 travel_mode；"
         "游览、用餐、入住等用 activity。工具会在确认前复核每段路线时间。"
     )
@@ -238,7 +238,9 @@ class CreateEventsTool(Tool):
             values = dict(raw)
             values["start_time"] = parse_naive_utc(values.get("start_time"))
             values["end_time"] = parse_naive_utc(values.get("end_time"))
-            payloads.append(EventCreate(**values))
+            payload = EventCreate(**values)
+            time_policy.ensure_not_past(payload.start_time)
+            payloads.append(payload)
         if not payloads:
             raise ValueError("至少需要一个行程项")
         return payloads
@@ -299,7 +301,7 @@ class CreateEventsTool(Tool):
                 }
             )
         titles = "、".join(item.title for item in payloads)
-        trip_title = kwargs.get("trip_title") or "一日行程"
+        trip_title = kwargs.get("trip_title") or "多段日程"
         return ToolResult(
             success=True,
             needs_confirmation=True,
@@ -378,7 +380,7 @@ class CreateEventsTool(Tool):
 class ReviseTripTool(Tool):
     name = "revise_trip"
     description = (
-        "原子调整一个旅行行程组。可整体顺延/提前、批量修改事件、删除景点或赶路段、"
+        "原子调整一个多段日程组。可整体顺延/提前、批量修改事件、删除活动或赶路段、"
         "更换交通方式和重命名；执行前统一展示完整新时间线并确认。"
     )
     _update_properties = {

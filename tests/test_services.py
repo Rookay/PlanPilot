@@ -25,10 +25,104 @@ from tests.helpers import make_session
 
 class ServiceTests(TestCase):
     def setUp(self):
+        self.time_patcher = patch(
+            "app.services.time_policy.utcnow",
+            return_value=datetime(2026, 9, 15),
+        )
+        self.time_patcher.start()
         self.db = make_session()
 
     def tearDown(self):
         self.db.close()
+        self.time_patcher.stop()
+
+    def test_new_items_cannot_be_scheduled_in_the_past(self):
+        with patch(
+            "app.services.time_policy.utcnow",
+            return_value=datetime(2026, 9, 18),
+        ):
+            with self.assertRaises(HTTPException) as event_error:
+                event_service.create_event(
+                    self.db,
+                    EventCreate(
+                        title="过去的会议",
+                        start_time=datetime(2026, 9, 17, 2),
+                        end_time=datetime(2026, 9, 17, 3),
+                    ),
+                )
+            with self.assertRaises(HTTPException) as task_error:
+                task_service.create_task(
+                    self.db,
+                    TaskCreate(
+                        title="过去的任务",
+                        start_time=datetime(2026, 9, 17, 2),
+                    ),
+                )
+
+            task = task_service.create_task(
+                self.db,
+                TaskCreate(title="未来任务", estimated_duration=60),
+            )
+            with self.assertRaises(HTTPException) as schedule_error:
+                schedule_service.create_schedule(
+                    self.db,
+                    task.id,
+                    datetime(2026, 9, 17, 2),
+                    datetime(2026, 9, 17, 3),
+                )
+
+            generated = schedule_service.generate_schedules(
+                self.db,
+                ScheduleGenerateRequest(
+                    start=datetime(2026, 9, 16),
+                    days=3,
+                ),
+            )
+
+        self.assertIn("不能早于当前时间", str(event_error.exception.detail))
+        self.assertIn("不能早于当前时间", str(task_error.exception.detail))
+        self.assertIn("不能早于当前时间", str(schedule_error.exception.detail))
+        self.assertTrue(generated.schedules)
+        self.assertTrue(
+            all(item.start_time >= datetime(2026, 9, 18) for item in generated.schedules)
+        )
+
+    def test_plan_preview_compares_changes_and_generate_keeps_other_ranges(self):
+        inside = task_service.create_task(
+            self.db,
+            TaskCreate(title="本周任务", estimated_duration=60),
+        )
+        outside = task_service.create_task(
+            self.db,
+            TaskCreate(
+                title="下周任务",
+                estimated_duration=60,
+                earliest_start=datetime(2026, 9, 25, 1),
+            ),
+        )
+        outside_schedule = schedule_service.create_schedule(
+            self.db,
+            outside.id,
+            datetime(2026, 9, 25, 1),
+            datetime(2026, 9, 25, 2),
+        )
+        payload = ScheduleGenerateRequest(
+            start=datetime(2026, 9, 16),
+            days=1,
+        )
+
+        preview = schedule_service.preview_plan(self.db, payload)
+        generated = schedule_service.generate_schedules(self.db, payload)
+
+        self.assertIn("comparison", preview)
+        self.assertGreaterEqual(preview["comparison"]["counts"]["added"], 1)
+        self.assertTrue(
+            any(item["task_id"] == inside.id for item in preview["comparison"]["changes"])
+        )
+        self.assertTrue(generated.schedules)
+        self.assertIsNotNone(
+            self.db.query(Schedule).filter(Schedule.id == outside_schedule.id).first()
+        )
 
     def test_local_preferences_drive_utc_planning_and_lunch_break(self):
         preference_service.update_preferences(
@@ -195,7 +289,7 @@ class ServiceTests(TestCase):
         self.assertEqual(result.schedules[0].start_time, datetime(2026, 9, 16, 11))
         self.assertIn("已用高德校验通勤", result.schedules[0].reason)
 
-    def test_plan_analysis_reports_fixed_itinerary_travel_conflict(self):
+    def test_plan_analysis_ignores_unrelated_fixed_schedule_travel_conflict(self):
         for title, start, end, longitude in (
             ("午饭", 10, 11, 118.78),
             ("逛街", 11, 12, 118.90),
@@ -213,8 +307,11 @@ class ServiceTests(TestCase):
                 ),
             )
 
+        requested_routes = []
+
         class FakeMapService:
             def get_routes(self, origin, destination, mode, city):
+                requested_routes.append((origin, destination, mode, city))
                 return RouteResponse(
                     provider="fake",
                     origin=origin,
@@ -237,9 +334,8 @@ class ServiceTests(TestCase):
                 ScheduleGenerateRequest(start=datetime(2026, 9, 16, 8), days=1),
             )
 
-        self.assertTrue(
-            any("固定行程冲突" in issue and "迟到 35 分钟" in issue for issue in result.analysis.issues)
-        )
+        self.assertFalse(any("固定行程冲突" in issue for issue in result.analysis.issues))
+        self.assertEqual(requested_routes, [])
 
     def test_plan_audit_uses_saved_travel_mode(self):
         event_service.create_event(
@@ -463,6 +559,165 @@ class ServiceTests(TestCase):
             )
         self.assertEqual(with_return.legs[-1].destination_id, "origin-return")
         self.assertIsNone(with_return.legs[-1].warning)
+
+    def test_itinerary_can_infer_or_select_trip_endpoints(self):
+        school = location_service.create_location(
+            self.db,
+            SavedLocationCreate(
+                label="学校",
+                city="南京",
+                longitude=118.80,
+                latitude=31.90,
+            ),
+        )
+        hotel = location_service.create_location(
+            self.db,
+            SavedLocationCreate(
+                label="酒店",
+                city="马鞍山",
+                longitude=118.50,
+                latitude=31.70,
+            ),
+        )
+        station = location_service.create_location(
+            self.db,
+            SavedLocationCreate(
+                label="马鞍山东站",
+                city="马鞍山",
+                longitude=118.55,
+                latitude=31.70,
+            ),
+        )
+        museum = location_service.create_location(
+            self.db,
+            SavedLocationCreate(
+                label="马鞍山市博物馆",
+                city="马鞍山",
+                longitude=118.52,
+                latitude=31.68,
+            ),
+        )
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="到达马鞍山东站",
+                start_time=datetime(2026, 9, 28, 2),
+                end_time=datetime(2026, 9, 28, 2, 20),
+                location_id=station.id,
+            ),
+        )
+        event_service.create_event(
+            self.db,
+            EventCreate(
+                title="参观博物馆",
+                start_time=datetime(2026, 9, 28, 3),
+                end_time=datetime(2026, 9, 28, 4),
+                location_id=museum.id,
+            ),
+        )
+
+        class FakeMapService:
+            def get_routes(self, origin, destination, mode, city):
+                return RouteResponse(
+                    provider="fake",
+                    origin=origin,
+                    destination=destination,
+                    routes=[
+                        RouteOption(
+                            distance_m=1000,
+                            duration_minutes=10,
+                            mode=mode,
+                            path=[origin, destination],
+                        )
+                    ],
+                )
+
+        with patch(
+            "app.services.itinerary_service.get_map_service",
+            return_value=FakeMapService(),
+        ):
+            automatic = itinerary_service.get_daily_itinerary(
+                self.db,
+                datetime(2026, 9, 28).date(),
+                origin_strategy="automatic",
+            )
+            selected = itinerary_service.get_daily_itinerary(
+                self.db,
+                datetime(2026, 9, 28).date(),
+                origin_strategy="automatic",
+                origin_location_id=hotel.id,
+                destination_location_id=hotel.id,
+            )
+
+        self.assertEqual(automatic.origin.label, "马鞍山东站")
+        self.assertNotEqual(automatic.origin.id, school.id)
+        self.assertEqual(len(automatic.legs), 1)
+        self.assertEqual(selected.origin.label, "酒店")
+        self.assertEqual(selected.destination.label, "酒店")
+        self.assertEqual(selected.legs[0].origin_id, "origin")
+        self.assertEqual(selected.legs[-1].destination_id, "trip-end")
+
+    def test_postflight_audit_only_checks_changed_events_and_boundaries(self):
+        created = []
+        for title, start_hour, end_hour, longitude in (
+            ("旧行程A", 1, 2, 118.40),
+            ("旧行程B", 2, 3, 118.50),
+            ("新行程A", 10, 11, 118.60),
+            ("新行程B", 12, 13, 118.61),
+        ):
+            created.append(
+                event_service.create_event(
+                    self.db,
+                    EventCreate(
+                        title=title,
+                        start_time=datetime(2026, 9, 28, start_hour),
+                        end_time=datetime(2026, 9, 28, end_hour),
+                        location=title,
+                        location_city="马鞍山",
+                        location_longitude=longitude,
+                        location_latitude=31.70,
+                    ),
+                )
+            )
+
+        class FakeMapService:
+            def get_routes(self, origin, destination, mode, city):
+                return RouteResponse(
+                    provider="fake",
+                    origin=origin,
+                    destination=destination,
+                    routes=[
+                        RouteOption(
+                            distance_m=10000,
+                            duration_minutes=90 if origin.longitude == 118.40 else 20,
+                            mode=mode,
+                        )
+                    ],
+                )
+
+        with patch(
+            "app.services.schedule_service.get_map_service",
+            return_value=FakeMapService(),
+        ):
+            global_audit = schedule_service.audit_current_plan(self.db)
+            scoped_audit = schedule_service.audit_applied_changes(
+                self.db,
+                [
+                    {
+                        "name": "create_events",
+                        "data": {
+                            "events": [
+                                {"id": created[2].id},
+                                {"id": created[3].id},
+                            ]
+                        },
+                    }
+                ],
+            )
+
+        self.assertTrue(any("旧行程A" in issue for issue in global_audit["issues"]))
+        self.assertTrue(scoped_audit["audited"])
+        self.assertEqual(scoped_audit["issues"], [])
 
     def test_travel_event_uses_its_end_time_as_arrival_deadline(self):
         event_service.create_event(

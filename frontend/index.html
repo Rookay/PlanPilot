@@ -9,28 +9,58 @@
 
 <body>
 
+<!-- 本地 SVG 图标集，路径取自 Lucide，避免页面依赖额外的图标服务。 -->
+<svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="m16.2 7.8-2.1 6.3-6.3 2.1 2.1-6.3 6.3-2.1Z"></path></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path></symbol>
+    <symbol id="icon-dashboard" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1"></rect><rect width="7" height="5" x="14" y="3" rx="1"></rect><rect width="7" height="9" x="14" y="12" rx="1"></rect><rect width="7" height="5" x="3" y="16" rx="1"></rect></symbol>
+    <symbol id="icon-tasks" viewBox="0 0 24 24"><path d="m3 17 2 2 4-4"></path><path d="m3 7 2 2 4-4"></path><path d="M13 6h8"></path><path d="M13 12h8"></path><path d="M13 18h8"></path></symbol>
+    <symbol id="icon-event" viewBox="0 0 24 24"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path><path d="M12 14h.01"></path><path d="M16 14h.01"></path><path d="M8 18h.01"></path></symbol>
+    <symbol id="icon-calendar" viewBox="0 0 24 24"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></symbol>
+    <symbol id="icon-map" viewBox="0 0 24 24"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3Z"></path><path d="M9 3v15"></path><path d="M15 6v15"></path></symbol>
+    <symbol id="icon-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="3"></circle><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"></path><circle cx="18" cy="5" r="3"></circle></symbol>
+    <symbol id="icon-chat" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"></path><path d="M8 9h8"></path><path d="M8 13h5"></path></symbol>
+    <symbol id="icon-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4"></path><path d="M3.3 19a10 10 0 1 1 17.4 0"></path><path d="M6.7 17h10.6"></path></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 21v-7"></path><path d="M4 10V3"></path><path d="M12 21v-9"></path><path d="M12 8V3"></path><path d="M20 21v-5"></path><path d="M20 12V3"></path><path d="M1 14h6"></path><path d="M9 8h6"></path><path d="M17 16h6"></path></symbol>
+    <symbol id="icon-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="m13 6 6 6-6 6"></path></symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"></path></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9Z"></path></symbol>
+</svg>
+
 <div class="app">
 
     <aside class="sidebar">
         <div class="brand">
-            <span class="brand-mark">P</span>
+            <span class="brand-mark"><svg class="icon"><use href="#icon-compass"></use></svg></span>
             <div><h1>PlanPilot</h1><small>智能日程规划</small></div>
         </div>
 
         <button class="primary-button sidebar-create" onclick="openTaskModal()">
-            + 新建任务
+            <svg class="icon"><use href="#icon-plus"></use></svg><span>新建任务</span>
         </button>
 
-        <nav>
-            <button data-page="dashboard" class="active" onclick="showPage('dashboard')">仪表盘</button>
-            <button data-page="tasks" onclick="showPage('tasks')">我的任务</button>
-            <button data-page="events" onclick="showPage('events')">固定行程</button>
-            <button data-page="calendar" onclick="showPage('calendar')">日历</button>
-            <button data-page="itinerary" onclick="showPage('itinerary')">行程地图</button>
-            <button data-page="planning" onclick="showPage('planning')">任务安排</button>
-            <button data-page="chat" onclick="showPage('chat')">对话助手</button>
-            <button data-page="evaluations" onclick="showPage('evaluations')">Agent 评测</button>
-            <button data-page="settings" onclick="showPage('settings')">规划偏好</button>
+        <nav aria-label="主要导航">
+            <div class="nav-group">
+                <span class="nav-group-label">总览</span>
+                <button data-page="dashboard" class="active" onclick="showPage('dashboard')"><svg class="icon"><use href="#icon-dashboard"></use></svg><span>仪表盘</span></button>
+            </div>
+            <div class="nav-group">
+                <span class="nav-group-label">计划</span>
+                <button data-page="tasks" onclick="showPage('tasks')"><svg class="icon"><use href="#icon-tasks"></use></svg><span>我的任务</span></button>
+                <button data-page="events" onclick="showPage('events')"><svg class="icon"><use href="#icon-event"></use></svg><span>固定日程</span></button>
+                <button data-page="calendar" onclick="showPage('calendar')"><svg class="icon"><use href="#icon-calendar"></use></svg><span>日历</span></button>
+                <button data-page="itinerary" onclick="showPage('itinerary')"><svg class="icon"><use href="#icon-map"></use></svg><span>地点路线</span></button>
+                <button data-page="planning" onclick="showPage('planning')"><svg class="icon"><use href="#icon-route"></use></svg><span>任务安排</span></button>
+            </div>
+            <div class="nav-group">
+                <span class="nav-group-label">智能</span>
+                <button data-page="chat" onclick="showPage('chat')"><svg class="icon"><use href="#icon-chat"></use></svg><span>对话助手</span></button>
+                <button data-page="evaluations" onclick="showPage('evaluations')"><svg class="icon"><use href="#icon-gauge"></use></svg><span>Agent 评测</span></button>
+            </div>
+            <div class="nav-group nav-group-bottom">
+                <button data-page="settings" onclick="showPage('settings')"><svg class="icon"><use href="#icon-settings"></use></svg><span>规划偏好</span></button>
+            </div>
         </nav>
     </aside>
 
@@ -41,63 +71,86 @@
         <section id="dashboard" class="page">
             <div class="page-header">
                 <div>
-                    <h2>仪表盘</h2>
-                    <p>今天也要好好安排时间</p>
+                    <span id="dashboardDate" class="page-eyebrow"></span>
+                    <h2>今日概览</h2>
+                    <p id="dashboardGreeting">把重要的事情安排得从容一些</p>
                 </div>
 
-                <button class="primary-button" onclick="openTaskModal()">
-                    + 新建任务
+                <button class="primary-button icon-button-text" onclick="openTaskModal()">
+                    <svg class="icon"><use href="#icon-plus"></use></svg><span>新建任务</span>
                 </button>
             </div>
 
             <div class="cards">
-                <div class="card">
-                    <div class="card-title">待完成任务</div>
+                <div class="card metric-card metric-pending">
+                    <div class="metric-card-head"><div class="card-title">待完成任务</div><span class="metric-icon"><svg class="icon"><use href="#icon-clock"></use></svg></span></div>
                     <div id="pendingCount" class="card-number">0</div>
+                    <div class="card-caption">等待投入</div>
                 </div>
 
-                <div class="card">
-                    <div class="card-title">进行中</div>
+                <div class="card metric-card metric-active">
+                    <div class="metric-card-head"><div class="card-title">进行中</div><span class="metric-icon"><svg class="icon"><use href="#icon-play"></use></svg></span></div>
                     <div id="inProgressCount" class="card-number">0</div>
+                    <div class="card-caption">正在推进</div>
                 </div>
 
-                <div class="card">
-                    <div class="card-title">已完成任务</div>
+                <div class="card metric-card metric-completed">
+                    <div class="metric-card-head"><div class="card-title">已完成任务</div><span class="metric-icon"><svg class="icon"><use href="#icon-check"></use></svg></span></div>
                     <div id="completedCount" class="card-number">0</div>
+                    <div id="dashboardCompletionRate" class="card-caption">完成率 0%</div>
                 </div>
 
-                <div class="card">
-                    <div class="card-title">已取消</div>
+                <div class="card metric-card metric-cancelled">
+                    <div class="metric-card-head"><div class="card-title">已取消</div><span class="metric-icon"><svg class="icon"><use href="#icon-tasks"></use></svg></span></div>
                     <div id="cancelledCount" class="card-number">0</div>
+                    <div class="card-caption">不再占用计划</div>
                 </div>
             </div>
 
-            <h3 class="section-title">最近任务</h3>
-            <div id="dashboardTaskList" class="task-list compact"></div>
+            <div class="dashboard-grid">
+                <section class="dashboard-section">
+                    <div class="section-heading">
+                        <div><span class="section-kicker">TASKS</span><h3 class="section-title">最近任务</h3></div>
+                        <button class="text-link" onclick="showPage('tasks')">查看全部<svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
+                    </div>
+                    <div id="dashboardTaskList" class="task-list compact"></div>
+                </section>
 
-            <h3 class="section-title">接下来</h3>
-            <div id="dashboardScheduleList" class="schedule-list"></div>
+                <section class="dashboard-section">
+                    <div class="section-heading">
+                        <div><span class="section-kicker">UP NEXT</span><h3 class="section-title">接下来</h3></div>
+                        <button class="text-link" onclick="showPage('calendar')">打开日历<svg class="icon"><use href="#icon-arrow-right"></use></svg></button>
+                    </div>
+                    <div id="dashboardScheduleList" class="schedule-list dashboard-schedule-list"></div>
+                </section>
+            </div>
         </section>
 
 
-        <!-- 一日行程地图 -->
+        <!-- 按日地点路线 -->
         <section id="itinerary" class="page hidden">
             <div class="page-header">
                 <div>
-                    <h2>一日行程</h2>
-                    <p>按时间查看地点、路程和出发建议</p>
+                    <h2>地点路线</h2>
+                    <p>查看当天各项日程之间的通勤路线与出发建议</p>
                 </div>
                 <div class="itinerary-controls">
-                    <input id="itineraryDate" type="date" onchange="loadItinerary()">
-                    <select id="itineraryMode" onchange="loadItinerary()">
-                        <option value="smart">智能推荐</option>
-                        <option value="transit">公交</option>
-                        <option value="driving">驾车</option>
-                        <option value="walking">步行</option>
-                    </select>
+                    <label class="itinerary-control-field"><span>日期</span><input id="itineraryDate" type="date" onchange="loadItinerary()"></label>
+                    <label class="itinerary-control-field"><span>方式</span><select id="itineraryMode" onchange="loadItinerary()">
+                            <option value="smart">智能推荐</option>
+                            <option value="transit">公交</option>
+                            <option value="driving">驾车</option>
+                            <option value="walking">步行</option>
+                        </select></label>
+                    <label class="itinerary-control-field itinerary-place-field"><span>出发点</span><select id="itineraryOrigin" onchange="loadItinerary()">
+                            <option value="auto">按当天行程判断</option>
+                        </select></label>
+                    <label class="itinerary-control-field itinerary-place-field"><span>终点</span><select id="itineraryDestination" onchange="loadItinerary()">
+                            <option value="last">停在最后一站</option>
+                            <option value="origin">返回出发点</option>
+                        </select></label>
                     <label class="itinerary-return"><input id="itineraryCar" type="checkbox" onchange="loadItinerary()"> 有车出发</label>
                     <label class="itinerary-parking">停车预留<input id="itineraryParking" type="number" min="0" max="60" value="10" onchange="loadItinerary()">分钟</label>
-                    <label class="itinerary-return"><input id="itineraryReturn" type="checkbox" onchange="loadItinerary()"> 返回默认地点</label>
                     <button class="ghost-button" onclick="setItineraryToday()">今天</button>
                 </div>
             </div>
@@ -158,16 +211,16 @@
         </section>
 
 
-        <!-- 固定行程 -->
+        <!-- 固定日程 -->
         <section id="events" class="page hidden">
             <div class="page-header">
                 <div>
-                    <h2>固定行程</h2>
+                    <h2>固定日程</h2>
                     <p>管理会议、预约、车次等不能自动移动的时间块</p>
                 </div>
 
                 <button class="primary-button" onclick="openEventModal()">
-                    + 新建固定行程
+                    + 新建固定日程
                 </button>
             </div>
 
@@ -185,7 +238,7 @@
                 </div>
 
                 <div class="calendar-nav">
-                    <button class="primary-button" onclick="openEventModal()">+ 固定行程</button>
+                    <button class="primary-button" onclick="openEventModal()">+ 固定日程</button>
                     <button class="ghost-button" onclick="previousWeek()">‹ 上一周</button>
                     <span class="week-label"></span>
                     <button class="ghost-button" onclick="goToday()">今天</button>
@@ -194,7 +247,7 @@
             </div>
 
             <div class="legend">
-                <span class="legend-item"><i class="dot dot-event"></i>固定行程</span>
+                <span class="legend-item"><i class="dot dot-event"></i>固定日程</span>
                 <span class="legend-item"><i class="dot dot-schedule"></i>待确认任务安排</span>
                 <span class="legend-item"><i class="dot dot-accepted"></i>已确认任务安排</span>
                 <span class="legend-item"><i class="dot dot-task"></i>待安排任务</span>
@@ -305,8 +358,8 @@
 
             <div class="page-header">
                 <div>
-                    <h2>任务安排</h2>
-                    <p class="muted">自动把任务安排到未来 7 天的空闲时间</p>
+                    <h2>计划中心</h2>
+                    <p class="muted">生成、比较并调整今天或本周的任务安排</p>
                 </div>
 
                 <div class="calendar-nav">
@@ -317,10 +370,19 @@
                 </div>
             </div>
 
+            <div class="planning-scope-bar">
+                <div class="segmented-control" role="group" aria-label="计划范围">
+                    <button id="planScopeToday" type="button" onclick="setPlanningScope('today')">今日</button>
+                    <button id="planScopeWeek" class="active" type="button" onclick="setPlanningScope('week')">本周</button>
+                    <button id="planScopeCustom" type="button" onclick="setPlanningScope('custom')">自定义</button>
+                </div>
+                <div id="planningOverview" class="planning-overview"></div>
+            </div>
+
             <div class="planning-actions">
                 <label>
                     起始时间
-                    <input id="planStart" type="datetime-local">
+                    <input id="planStart" type="datetime-local" onchange="markPlanningScopeCustom()">
                 </label>
 
                 <label>
@@ -335,7 +397,7 @@
 
                 <label>
                     天数
-                    <input id="planDays" type="number" min="1" max="30" value="7">
+                    <input id="planDays" type="number" min="1" max="30" value="7" onchange="markPlanningScopeCustom()">
                 </label>
 
                 <label>
@@ -348,7 +410,7 @@
                 </button>
 
                 <button class="ghost-button" onclick="previewSchedule()">
-                    预览评分
+                    对比方案
                 </button>
 
                 <button id="acceptAllButton" class="ghost-button" onclick="acceptAllSchedules()">
@@ -359,8 +421,8 @@
                     清空待确认安排
                 </button>
 
-                <button class="ghost-button" onclick="replanCurrentWeek()">
-                    局部重排本周
+                <button class="ghost-button" onclick="previewLocalReplan()">
+                    重排当前范围
                 </button>
 
                 <button class="ghost-button" onclick="undoLatestPlan()">
@@ -371,6 +433,18 @@
             <div id="planningTimetable" class="timetable-host"></div>
 
             <div id="planAnalysis" class="plan-analysis hidden"></div>
+            <section id="planComparison" class="plan-comparison hidden">
+                <div class="plan-comparison-header">
+                    <div><span>方案变更</span><h3 id="planComparisonTitle">规划方案对比</h3></div>
+                    <button class="modal-close-button" type="button" aria-label="关闭方案对比" onclick="closePlanComparison()">×</button>
+                </div>
+                <div id="planComparisonSummary" class="plan-comparison-summary"></div>
+                <div id="planComparisonRows" class="plan-comparison-rows"></div>
+                <div id="planComparisonActions" class="plan-comparison-actions hidden">
+                    <button class="ghost-button" type="button" onclick="closePlanComparison()">取消</button>
+                    <button class="primary-button" type="button" onclick="applyPendingReplan()">确认重排</button>
+                </div>
+            </section>
             <div id="scheduleResult"></div>
             <section class="plan-history-section">
                 <div class="plan-history-heading">
@@ -641,13 +715,13 @@
 </div>
 
 
-<!-- 新建 / 编辑固定行程弹窗 -->
+<!-- 新建 / 编辑固定日程弹窗 -->
 
 <div id="eventModal" class="modal hidden">
 
     <div class="modal-content">
 
-        <h2 id="eventModalTitle">新建固定行程</h2>
+        <h2 id="eventModalTitle">新建固定日程</h2>
 
         <label>
             行程名称
@@ -784,7 +858,7 @@
                 id="eventSubmitButton"
                 class="primary-button"
                 onclick="submitEvent()">
-                创建固定行程
+                创建固定日程
             </button>
 
         </div>

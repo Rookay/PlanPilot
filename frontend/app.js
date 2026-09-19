@@ -57,6 +57,8 @@ const state = {
   agentRuns: [],
   evaluationRun: null,
   evaluationsLoaded: false,
+  planningScope: "week",
+  pendingReplan: null,
 };
 
 state.chatSessionId =
@@ -164,6 +166,23 @@ function toDateTimeLocalValue(value) {
   );
 }
 
+function updateFutureInputMinimums() {
+  const minimum = toDateTimeLocalValue(new Date(Date.now() + 60 * 1000));
+  for (const id of [
+    "planStart",
+    "taskStartTime",
+    "taskEarliestStart",
+    "taskDeadline",
+    "eventStartTime",
+    "eventEndTime",
+  ]) {
+    const input = $(id);
+    if (input) {
+      input.min = minimum;
+    }
+  }
+}
+
 function getPriorityName(priority) {
   const map = { low: "低", medium: "中", high: "高" };
   return map[priority] || priority;
@@ -241,7 +260,13 @@ function showPage(pageName) {
   }
 
   document.querySelectorAll(".sidebar nav button").forEach((button) => {
-    button.classList.toggle("active", button.dataset.page === pageName);
+    const active = button.dataset.page === pageName;
+    button.classList.toggle("active", active);
+    if (active) {
+      button.setAttribute("aria-current", "page");
+    } else {
+      button.removeAttribute("aria-current");
+    }
   });
 
   if (pageName === "tasks" || pageName === "dashboard") {
@@ -298,7 +323,7 @@ async function loadEvents() {
     const container = $("eventList");
     if (container) {
       container.innerHTML = `
-        <div class="empty error">加载固定行程失败：${escapeHtml(error.message)}</div>
+        <div class="empty error">加载固定日程失败：${escapeHtml(error.message)}</div>
       `;
     }
     throw error;
@@ -322,11 +347,13 @@ async function loadAllData() {
   updateDashboard();
   renderDashboardSchedules();
   renderTimetables();
+  renderPlanningOverview();
 }
 
 async function refreshSchedules() {
   state.schedules = await api("/schedules");
   renderTimetables();
+  renderPlanningOverview();
 }
 
 
@@ -394,7 +421,6 @@ function renderTaskItem(task) {
   const meta = [
     `时长 ${task.estimated_duration} 分钟`,
     `优先级：${getPriorityName(task.priority)}`,
-    `状态：${getStatusName(task.status)}`,
   ];
 
   const startText = formatDateTime(task.start_time);
@@ -434,9 +460,12 @@ function renderTaskItem(task) {
     : "";
 
   return `
-    <div class="task ${done ? "task-done" : ""}">
+    <div class="task ${done ? "task-done" : ""} priority-${task.priority}">
       <div class="task-main">
-        <div class="task-title">${escapeHtml(task.title)}</div>
+        <div class="task-heading">
+          <div class="task-title">${escapeHtml(task.title)}</div>
+          <span class="state-pill state-${task.status}">${escapeHtml(getStatusName(task.status))}</span>
+        </div>
         <div class="task-info">${escapeHtml(meta.join(" · "))}</div>
         ${description}
       </div>
@@ -476,7 +505,7 @@ function renderDashboardTasks() {
       const startText = formatDateTime(task.start_time);
       return `
         <div class="mini-task">
-          <span class="mini-task-title">${escapeHtml(task.title)}</span>
+          <span class="mini-task-title"><i class="priority-dot priority-${task.priority}"></i>${escapeHtml(task.title)}</span>
           <span class="mini-task-meta">
             ${startText ? escapeHtml(startText) : "未设置时间"} ·
             ${escapeHtml(getStatusName(task.status))}
@@ -616,10 +645,34 @@ function updateDashboard() {
   const countOf = (status) =>
     state.tasks.filter((task) => task.status === status).length;
 
-  setText("pendingCount", countOf("pending"));
-  setText("inProgressCount", countOf("in_progress"));
-  setText("completedCount", countOf("completed"));
-  setText("cancelledCount", countOf("cancelled"));
+  const pending = countOf("pending");
+  const inProgress = countOf("in_progress");
+  const completed = countOf("completed");
+  const cancelled = countOf("cancelled");
+  const activeTotal = pending + inProgress + completed;
+  const completionRate = activeTotal ? Math.round((completed / activeTotal) * 100) : 0;
+
+  setText("pendingCount", pending);
+  setText("inProgressCount", inProgress);
+  setText("completedCount", completed);
+  setText("cancelledCount", cancelled);
+  setText("dashboardCompletionRate", `完成率 ${completionRate}%`);
+
+  const now = new Date();
+  setText(
+    "dashboardDate",
+    new Intl.DateTimeFormat("zh-CN", {
+      month: "long",
+      day: "numeric",
+      weekday: "long",
+    }).format(now),
+  );
+  const hour = now.getHours();
+  const greeting = hour < 6 ? "夜深了，留一点时间给休息" :
+    hour < 12 ? "上午好，先处理今天最重要的事情" :
+    hour < 18 ? "下午好，继续稳稳推进今天的计划" :
+    "晚上好，整理一下今天的进度";
+  setText("dashboardGreeting", greeting);
 }
 
 function setText(id, value) {
@@ -635,6 +688,7 @@ function setText(id, value) {
 ========================= */
 
 function openTaskModal(id = null) {
+  updateFutureInputMinimums();
   state.editingTaskId = id;
 
   if (id) {
@@ -711,7 +765,7 @@ function populateTaskDependencyOptions(selectedIds = [], currentTaskId = null) {
 
 
 /* =========================
-   固定行程
+   固定日程
 ========================= */
 
 function renderEvents() {
@@ -722,7 +776,7 @@ function renderEvents() {
 
   if (state.events.length === 0) {
     container.innerHTML = `
-      <div class="empty">还没有固定行程，添加会议、预约或车次吧</div>
+      <div class="empty">还没有固定日程，添加会议、预约或车次吧</div>
     `;
     return;
   }
@@ -733,7 +787,7 @@ function renderEvents() {
 function renderEventItem(event) {
   const meta = [eventDurationText(event)];
   if (event.trip_id) {
-    meta.push(`行程组：${event.trip_title || "未命名行程"}`);
+    meta.push(`日程组：${event.trip_title || "未命名日程组"}`);
   }
   const savedLocation = locationById(event.location_id);
   const savedOrigin = locationById(event.origin_location_id);
@@ -752,7 +806,7 @@ function renderEventItem(event) {
     : "";
 
   return `
-    <div class="event">
+    <div class="event ${event.event_type === "travel" ? "event-travel" : "event-fixed"}">
       <div class="task-main">
         <div class="task-title"><span class="kind-badge fixed-kind">固定</span>${escapeHtml(event.title)}</div>
         <div class="task-info">${escapeHtml(meta.filter(Boolean).join(" · "))}</div>
@@ -772,12 +826,13 @@ function renderEventItem(event) {
 }
 
 function openEventModal(id = null) {
+  updateFutureInputMinimums();
   state.editingEventId = id;
 
   if (id) {
     const event = state.events.find((item) => item.id === id);
     if (event) {
-      $("eventModalTitle").textContent = "编辑固定行程";
+      $("eventModalTitle").textContent = "编辑固定日程";
       $("eventSubmitButton").textContent = "保存修改";
       $("eventTitle").value = event.title || "";
       $("eventDescription").value = event.description || "";
@@ -793,8 +848,8 @@ function openEventModal(id = null) {
       toggleRecurrenceFields();
     }
   } else {
-    $("eventModalTitle").textContent = "新建固定行程";
-    $("eventSubmitButton").textContent = "创建固定行程";
+    $("eventModalTitle").textContent = "新建固定日程";
+    $("eventSubmitButton").textContent = "创建固定日程";
     clearEventForm();
     $("eventRecurrence").disabled = false;
   }
@@ -904,7 +959,7 @@ async function submitEvent() {
 }
 
 async function deleteEvent(id) {
-  if (!confirm("确定删除这个固定行程吗？")) {
+  if (!confirm("确定删除这个固定日程吗？")) {
     return;
   }
 
@@ -918,7 +973,7 @@ async function deleteEvent(id) {
 
 
 /* =========================
-   一日行程地图
+   按日地点路线
 ========================= */
 
 function localDateInputValue(date = new Date()) {
@@ -940,20 +995,33 @@ async function loadItinerary() {
     dateInput.value = localDateInputValue();
   }
   const mode = $("itineraryMode").value;
-  const includeReturn = $("itineraryReturn").checked;
+  const originValue = $("itineraryOrigin")?.value || "auto";
+  const destinationValue = $("itineraryDestination")?.value || "last";
   const carAvailable = $("itineraryCar").checked;
   const parkingMinutes = Math.max(0, Math.min(60, Number($("itineraryParking").value) || 0));
+  const query = new URLSearchParams({
+    date: dateInput.value,
+    mode,
+    include_return: String(destinationValue === "origin"),
+    car_available: String(carAvailable),
+    parking_minutes: String(parkingMinutes),
+    origin_strategy: originValue === "auto" ? "automatic" : "default",
+  });
+  if (originValue.startsWith("location:")) {
+    query.set("origin_location_id", originValue.slice("location:".length));
+  }
+  if (destinationValue.startsWith("location:")) {
+    query.set("destination_location_id", destinationValue.slice("location:".length));
+  }
   $("itineraryTimeline").innerHTML = '<div class="itinerary-empty">正在整理行程...</div>';
   try {
-    state.itinerary = await api(
-      `/itineraries/day?date=${encodeURIComponent(dateInput.value)}&mode=${encodeURIComponent(mode)}&include_return=${includeReturn}&car_available=${carAvailable}&parking_minutes=${parkingMinutes}`,
-    );
+    state.itinerary = await api(`/itineraries/day?${query.toString()}`);
     renderItineraryTimeline();
     await renderItineraryMap();
   } catch (error) {
     $("itineraryTimeline").innerHTML =
       `<div class="itinerary-empty error">加载失败：${escapeHtml(error.message)}</div>`;
-    showMapFallback("暂时无法加载行程地图");
+    showMapFallback("暂时无法加载地点路线");
   }
 }
 
@@ -975,7 +1043,7 @@ function renderItineraryTimeline() {
   }
 
   if (!itinerary.items.length) {
-    container.innerHTML = '<div class="itinerary-empty">这一天还没有固定行程或任务安排</div>';
+    container.innerHTML = '<div class="itinerary-empty">这一天还没有固定日程或任务安排</div>';
     return;
   }
 
@@ -983,11 +1051,14 @@ function renderItineraryTimeline() {
     itinerary.legs.map((leg) => [leg.destination_id, leg]),
   );
   const rows = [];
-  if (itinerary.origin) {
+  const firstLocatedItem = itinerary.items.find((item) => item.location);
+  const originIsFirstStop = itinerary.origin_strategy === "automatic"
+    && sameItineraryCoordinate(itinerary.origin, firstLocatedItem?.location);
+  if (itinerary.origin && !originIsFirstStop) {
     rows.push(`
       <div class="itinerary-origin">
         <span class="itinerary-pin origin-pin">起</span>
-        <div><strong>${escapeHtml(itinerary.origin.label)}</strong><small>默认出发点</small></div>
+        <div><strong>${escapeHtml(itinerary.origin.label)}</strong><small>${itinerary.origin_strategy === "automatic" ? "按首段行程判断" : "选择的出发点"}</small></div>
       </div>
     `);
   }
@@ -1030,7 +1101,7 @@ function renderItineraryTimeline() {
       ? `${item.origin_location?.label || "上一地点"} → ${item.location?.label || "未指定目的地"}`
       : item.location?.label || "未绑定地点";
     const statusText = item.kind === "event"
-      ? item.event_type === "travel" ? "赶路" : "固定行程"
+      ? item.event_type === "travel" ? "赶路" : "固定日程"
       : item.status === "accepted" ? "已确认任务" : "待确认任务";
     const itemInteraction = item.location
       ? `role="button" tabindex="0" onclick="focusItineraryItem('${item.id}')" onkeydown="handleItineraryItemKey(event, '${item.id}')"`
@@ -1046,19 +1117,21 @@ function renderItineraryTimeline() {
       </div>
     `);
   });
-  const returnLeg = itinerary.legs.find((leg) => leg.destination_id === "origin-return");
-  if (returnLeg && itinerary.origin) {
-    const routeText = returnLeg.duration_minutes === null
-      ? "返程路线待计算"
-      : `${travelModeName(returnLeg.display_mode || returnLeg.mode)} ${returnLeg.duration_minutes} 分钟${returnLeg.distance_m === null ? "" : ` · ${formatDistance(returnLeg.distance_m)}`}`;
+  const endpointLeg = itinerary.legs.find((leg) =>
+    ["origin-return", "trip-end"].includes(leg.destination_id),
+  );
+  if (endpointLeg && itinerary.destination) {
+    const routeText = endpointLeg.duration_minutes === null
+      ? "终点路线待计算"
+      : `${travelModeName(endpointLeg.display_mode || endpointLeg.mode)} ${endpointLeg.duration_minutes} 分钟${endpointLeg.distance_m === null ? "" : ` · ${formatDistance(endpointLeg.distance_m)}`}`;
     rows.push(`
       <div class="itinerary-leg return-leg">
         <span>${escapeHtml(routeText)}</span>
-        ${returnLeg.estimated_arrival ? `<small>预计 ${formatTime(parseDate(returnLeg.estimated_arrival))} 返回</small>` : ""}
+        ${endpointLeg.estimated_arrival ? `<small>预计 ${formatTime(parseDate(endpointLeg.estimated_arrival))} 到达</small>` : ""}
       </div>
       <div class="itinerary-origin return-origin">
         <span class="itinerary-pin origin-pin">终</span>
-        <div><strong>${escapeHtml(itinerary.origin.label)}</strong><small>返回默认地点</small></div>
+        <div><strong>${escapeHtml(itinerary.destination.label)}</strong><small>${endpointLeg.destination_id === "origin-return" ? "返回出发点" : "选择的终点"}</small></div>
       </div>
     `);
   }
@@ -1096,6 +1169,14 @@ function focusItineraryItem(itemId) {
 
 function formatDistance(distance) {
   return distance >= 1000 ? `${(distance / 1000).toFixed(1)} 公里` : `${distance} 米`;
+}
+
+function sameItineraryCoordinate(first, second) {
+  if (!first?.coordinate || !second?.coordinate) {
+    return false;
+  }
+  return Number(first.coordinate.longitude).toFixed(6) === Number(second.coordinate.longitude).toFixed(6)
+    && Number(first.coordinate.latitude).toFixed(6) === Number(second.coordinate.latitude).toFixed(6);
 }
 
 async function loadMapClient() {
@@ -1240,6 +1321,18 @@ async function renderItineraryMap() {
     );
   });
 
+  const endpointLeg = itinerary.legs.find((leg) =>
+    ["origin-return", "trip-end"].includes(leg.destination_id),
+  );
+  if (endpointLeg && itinerary.destination) {
+    addMarker(
+      endpointLeg.destination_id,
+      itinerary.destination,
+      "终",
+      itinerary.destination.label,
+    );
+  }
+
   itinerary.legs.forEach((leg) => {
     let polyline = null;
     if (leg.path && leg.path.length >= 2) {
@@ -1295,6 +1388,78 @@ function showMapFallback(message) {
    日程规划
 ========================= */
 
+function setPlanningScope(scope) {
+  state.planningScope = scope;
+  const now = new Date();
+  if (scope === "today") {
+    $("planStart").value = toDateTimeLocalValue(now);
+    $("planDays").value = 1;
+  } else if (scope === "week") {
+    const weekday = (now.getDay() + 6) % 7;
+    $("planStart").value = toDateTimeLocalValue(now);
+    $("planDays").value = Math.max(1, 7 - weekday);
+  }
+  for (const name of ["today", "week", "custom"]) {
+    const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
+    button?.classList.toggle("active", name === scope);
+  }
+  closePlanComparison();
+  renderPlanningOverview();
+}
+
+function markPlanningScopeCustom() {
+  if (state.planningScope !== "custom") {
+    state.planningScope = "custom";
+    for (const name of ["today", "week", "custom"]) {
+      const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
+      button?.classList.toggle("active", name === "custom");
+    }
+  }
+  renderPlanningOverview();
+}
+
+function planningRange() {
+  const rawStart = $("planStart")?.value;
+  const start = rawStart ? new Date(rawStart) : new Date();
+  const days = Math.max(1, Number($("planDays")?.value) || 1);
+  const end = state.planningScope === "today"
+    ? addDays(startOfDay(start), 1)
+    : state.planningScope === "week"
+      ? addDays(startOfWeek(start), 7)
+      : addDays(start, days);
+  return { start, end, days };
+}
+
+function renderPlanningOverview() {
+  const container = $("planningOverview");
+  if (!container) {
+    return;
+  }
+  const { start, end } = planningRange();
+  const schedules = state.schedules.filter((item) => {
+    const itemStart = parseDate(item.start_time);
+    return itemStart && itemStart >= start && itemStart < end
+      && ["proposed", "accepted"].includes(item.status);
+  });
+  const arrangedTaskIds = new Set(schedules.map((item) => item.task_id));
+  const pendingTasks = state.tasks.filter(
+    (task) => ["pending", "in_progress"].includes(task.status)
+      && !arrangedTaskIds.has(task.id),
+  ).length;
+  const minutes = schedules.reduce((total, item) => {
+    const itemStart = parseDate(item.start_time);
+    const itemEnd = parseDate(item.end_time);
+    return total + (itemStart && itemEnd ? Math.max(0, (itemEnd - itemStart) / 60000) : 0);
+  }, 0);
+  const locked = schedules.filter((item) => item.is_locked).length;
+  container.innerHTML = `
+    <span><strong>${schedules.length}</strong> 个时间块</span>
+    <span><strong>${(minutes / 60).toFixed(1)}</strong> 小时</span>
+    <span><strong>${pendingTasks}</strong> 个待安排任务</span>
+    <span><strong>${locked}</strong> 个已锁定</span>
+  `;
+}
+
 async function generateSchedule() {
   const container = $("scheduleResult");
   container.innerHTML = `<div class="empty">正在规划…</div>`;
@@ -1311,6 +1476,7 @@ async function generateSchedule() {
     await loadAllData();
     renderSchedule(result);
     renderPlanAnalysis(result.analysis, "规划完成");
+    closePlanComparison();
   } catch (error) {
     container.innerHTML = `
       <div class="empty error">
@@ -1344,9 +1510,75 @@ async function previewSchedule() {
       body: JSON.stringify(collectPlanPayload()),
     });
     renderPlanAnalysis(result.analysis, "预览结果");
+    renderPlanComparison(result.comparison, "规划方案对比");
   } catch (error) {
     renderPlanAnalysis({ score: 0, issues: [error.message] }, "预览失败");
   }
+}
+
+function renderPlanComparison(comparison, title, allowApply = false) {
+  const panel = $("planComparison");
+  if (!panel || !comparison) {
+    return;
+  }
+  const counts = comparison.counts || {};
+  if (!allowApply) {
+    state.pendingReplan = null;
+  }
+  $("planComparisonTitle").textContent = title;
+  $("planComparisonSummary").innerHTML = [
+    ["保留", counts.preserved || 0, "preserved"],
+    ["移动", counts.moved || 0, "moved"],
+    ["新增", counts.added || 0, "added"],
+    ["移除", counts.removed || 0, "removed"],
+    ["不变", counts.unchanged || 0, "unchanged"],
+  ].map(([label, value, type]) => `
+    <div class="comparison-metric ${type}"><span>${label}</span><strong>${value}</strong></div>
+  `).join("");
+
+  const changed = (comparison.changes || []).filter((item) => item.type !== "unchanged");
+  $("planComparisonRows").innerHTML = changed.length
+    ? changed.map(renderPlanComparisonRow).join("")
+    : '<div class="empty">当前方案无需调整</div>';
+  $("planComparisonActions").classList.toggle("hidden", !allowApply);
+  panel.classList.remove("hidden");
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function renderPlanComparisonRow(change) {
+  const task = state.tasks.find((item) => item.id === change.task_id);
+  const title = task?.title || `任务 #${change.task_id}`;
+  const labels = { added: "新增", removed: "移除", moved: "调整" };
+  const before = planComparisonTime(change.before);
+  const after = planComparisonTime(change.after);
+  const timeMarkup = change.type === "moved"
+    ? `<span>${escapeHtml(before)}</span><b>→</b><span>${escapeHtml(after)}</span>`
+    : `<span>${escapeHtml(after || before)}</span>`;
+  return `
+    <div class="plan-comparison-row ${change.type}">
+      <span class="comparison-type">${labels[change.type] || change.type}</span>
+      <div class="comparison-task"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(change.reason || "")}</small></div>
+      <div class="comparison-time">${timeMarkup}</div>
+    </div>
+  `;
+}
+
+function planComparisonTime(item) {
+  if (!item) {
+    return "";
+  }
+  const start = parseDate(item.start_time);
+  const end = parseDate(item.end_time);
+  if (!start) {
+    return "";
+  }
+  return `${start.getMonth() + 1}/${start.getDate()} ${formatTime(start)}${end ? `–${formatTime(end)}` : ""}`;
+}
+
+function closePlanComparison() {
+  $("planComparison")?.classList.add("hidden");
+  state.pendingReplan = null;
+  $("planComparisonActions")?.classList.add("hidden");
 }
 
 function renderPlanAnalysis(analysis, title = "计划分析") {
@@ -1516,23 +1748,40 @@ async function toggleScheduleLock(id) {
   }
 }
 
-async function replanCurrentWeek() {
-  const start = state.weekStart || startOfWeek(new Date());
-  const end = addDays(start, 7);
+async function previewLocalReplan() {
+  const { start, end } = planningRange();
   const payload = {
     start: start.toISOString(),
     end: end.toISOString(),
     include_unscheduled: true,
   };
+  const gapValue = $("planGap").value;
+  const strategy = $("planStrategy").value;
+  if (gapValue !== "") {
+    payload.gap_minutes = Number(gapValue);
+  }
+  if (strategy) {
+    payload.strategy = strategy;
+  }
   try {
     const preview = await api("/schedules/replan-local/preview", {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    const summary = `将保留 ${preview.kept_locked} 条锁定日程，重排 ${preview.removed.length} 条安排，并生成 ${preview.proposed.length} 个时间块。确认继续吗？`;
-    if (!confirm(summary)) {
-      return;
-    }
+    state.pendingReplan = payload;
+    renderPlanAnalysis(preview.analysis, "局部重排预览");
+    renderPlanComparison(preview.comparison, "局部重排前后对比", true);
+  } catch (error) {
+    alert(`局部重排预览失败：${error.message}`);
+  }
+}
+
+async function applyPendingReplan() {
+  if (!state.pendingReplan) {
+    return;
+  }
+  const payload = state.pendingReplan;
+  try {
     await api("/schedules/replan-local", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -1540,6 +1789,7 @@ async function replanCurrentWeek() {
     await loadAllData();
     renderSchedule(null);
     await loadPlanVersions();
+    closePlanComparison();
   } catch (error) {
     alert(`局部重排失败：${error.message}`);
   }
@@ -2000,7 +2250,7 @@ function buildCalendarItemDetail(kind, id) {
       : destination?.label || "";
     return {
       title: event.title,
-      badge: isTravel ? "赶路" : "固定行程",
+      badge: isTravel ? "赶路" : "固定日程",
       badgeClass: "fixed",
       description: event.description,
       details: [
@@ -2008,7 +2258,7 @@ function buildCalendarItemDetail(kind, id) {
         ["时间", calendarTimeRange(start, end)],
         ["时长", calendarDurationText(start, end)],
         ...(isTravel ? [["交通方式", travelModeName(event.travel_mode)]] : []),
-        ...(event.trip_id ? [["行程组", event.trip_title || "未命名行程"]] : []),
+        ...(event.trip_id ? [["日程组", event.trip_title || "未命名日程组"]] : []),
       ],
       locationText,
       locations: isTravel ? [origin, destination].filter(Boolean) : [destination].filter(Boolean),
@@ -2164,11 +2414,28 @@ async function renderCalendarDetailMap(locations) {
       location,
     ]),
   ).values()];
-  const markers = uniqueLocations.map((location) => new AMap.Marker({
-    position: [location.coordinate.longitude, location.coordinate.latitude],
-    title: location.label,
-    anchor: "bottom-center",
-  }));
+  const hasMultipleLocations = uniqueLocations.length > 1;
+  const markers = uniqueLocations.map((location, index) => {
+    const markerRole = hasMultipleLocations
+      ? (index === 0 ? "起" : index === uniqueLocations.length - 1 ? "终" : index + 1)
+      : "";
+    const markerClass = hasMultipleLocations && index === 0 ? "is-origin" : "is-primary";
+    return new AMap.Marker({
+      position: [location.coordinate.longitude, location.coordinate.latitude],
+      title: location.label,
+      anchor: "bottom-center",
+      zIndex: 120 + index,
+      content: `
+        <div class="calendar-map-marker ${markerClass}">
+          <div class="calendar-map-marker-label">
+            ${markerRole ? `<span>${escapeHtml(markerRole)}</span>` : ""}
+            <strong>${escapeHtml(location.label || "日程地点")}</strong>
+          </div>
+          <i aria-hidden="true"></i>
+        </div>
+      `,
+    });
+  });
   state.calendarDetailMap.add(markers);
   if (markers.length === 1) {
     state.calendarDetailMap.setZoomAndCenter(15, markers[0].getPosition());
@@ -2432,6 +2699,35 @@ function populateLocationOptions() {
       ),
     ].join("");
     select.value = current;
+  }
+
+  const originSelect = $("itineraryOrigin");
+  if (originSelect) {
+    const current = originSelect.value || "auto";
+    originSelect.innerHTML = [
+      '<option value="auto">按当天行程判断</option>',
+      ...state.locations.map(
+        (location) => `<option value="location:${location.id}">${escapeHtml(location.label)}${location.is_default ? "（默认）" : ""}</option>`,
+      ),
+    ].join("");
+    originSelect.value = Array.from(originSelect.options).some((option) => option.value === current)
+      ? current
+      : "auto";
+  }
+
+  const destinationSelect = $("itineraryDestination");
+  if (destinationSelect) {
+    const current = destinationSelect.value || "last";
+    destinationSelect.innerHTML = [
+      '<option value="last">停在最后一站</option>',
+      '<option value="origin">返回出发点</option>',
+      ...state.locations.map(
+        (location) => `<option value="location:${location.id}">${escapeHtml(location.label)}${location.is_default ? "（默认）" : ""}</option>`,
+      ),
+    ].join("");
+    destinationSelect.value = Array.from(destinationSelect.options).some((option) => option.value === current)
+      ? current
+      : "last";
   }
 }
 
@@ -3185,6 +3481,8 @@ function handleError(error) {
 
 function init() {
   state.weekStart = startOfWeek(new Date());
+  updateFutureInputMinimums();
+  setPlanningScope("week");
   if ($("itineraryDate")) {
     $("itineraryDate").value = localDateInputValue();
   }

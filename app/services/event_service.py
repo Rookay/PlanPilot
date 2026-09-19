@@ -18,7 +18,7 @@ from app.schemas.event import (
     TripRevision,
     TripSummary,
 )
-from app.services import location_service
+from app.services import location_service, time_policy
 from app.utils import to_naive_utc
 
 
@@ -36,6 +36,7 @@ def _validate_time_range(event: Event) -> None:
 
 def create_event(db: Session, data: EventCreate) -> Event:
     values = _normalize_event_times(data.model_dump())
+    time_policy.ensure_not_past(values.get("start_time"))
     _validate_location(db, values.get("location_id"))
     _validate_location(db, values.get("origin_location_id"))
     _validate_coordinates(values.get("location_longitude"), values.get("location_latitude"))
@@ -75,6 +76,7 @@ def create_events(
     try:
         for order, data in enumerate(ordered_items, start=1):
             values = _normalize_event_times(data.model_dump())
+            time_policy.ensure_not_past(values.get("start_time"))
             _validate_location(db, values.get("location_id"))
             _validate_location(db, values.get("origin_location_id"))
             _validate_coordinates(
@@ -219,6 +221,9 @@ def preview_trip_revision(db: Session, revision: TripRevision) -> dict:
                 )
             values.update(changes)
         values = _normalize_event_times(values)
+        original = by_id[event.id]
+        if values["start_time"] != original.start_time:
+            time_policy.ensure_not_past(values["start_time"])
         after.append((event.id, EventCreate(**values)))
 
     if not after:
@@ -278,6 +283,7 @@ def create_event_series(db: Session, data: EventSeriesCreate) -> List[Event]:
     common = data.model_dump(exclude={"recurrence", "occurrences", "start_time", "end_time"})
     current_start = to_naive_utc(data.start_time)
     current_end = to_naive_utc(data.end_time)
+    time_policy.ensure_not_past(current_start)
     created: List[Event] = []
     _validate_location(db, common.get("location_id"))
     _validate_location(db, common.get("origin_location_id"))
@@ -324,6 +330,8 @@ def update_event(db: Session, event_id: int, data: EventUpdate) -> Event:
     event = get_event(db, event_id)
 
     update_data = _normalize_event_times(data.model_dump(exclude_unset=True))
+    if "start_time" in update_data:
+        time_policy.ensure_not_past(update_data["start_time"])
     if "location_id" in update_data:
         _validate_location(db, update_data["location_id"])
     if "origin_location_id" in update_data:

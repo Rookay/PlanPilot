@@ -97,7 +97,13 @@ class Agent:
             )
             if result.success:
                 summaries.append(result.summary or call["name"])
-                applied.append({"name": call["name"], "summary": result.summary})
+                applied.append(
+                    {
+                        "name": call["name"],
+                        "summary": result.summary,
+                        "data": result.data,
+                    }
+                )
                 if (
                     call["name"] in ("generate_plan", "replan", "replan_local")
                     and isinstance(result.data, dict)
@@ -149,19 +155,20 @@ class Agent:
             for item in result.tool_calls
         ]
         if result.applied_changes and not result.confirmation.required:
-            audit = schedule_service.audit_current_plan(db)
-            result.workflow_steps.append(
-                {
-                    "kind": "audit",
-                    "stage": "复查",
-                    "name": "postflight_audit",
-                    "label": self.loop.tool_label("postflight_audit"),
-                    "status": "completed" if audit["valid"] else "warning",
-                    "summary": "未发现冲突" if audit["valid"] else "；".join(audit["issues"]),
-                }
-            )
-            if audit["issues"]:
-                result.reply += " 复查发现：" + "；".join(audit["issues"])
+            audit = schedule_service.audit_applied_changes(db, result.applied_changes)
+            if audit["audited"]:
+                result.workflow_steps.append(
+                    {
+                        "kind": "audit",
+                        "stage": "复查",
+                        "name": "postflight_audit",
+                        "label": self.loop.tool_label("postflight_audit"),
+                        "status": "completed" if audit["valid"] else "warning",
+                        "summary": "未发现冲突" if audit["valid"] else "；".join(audit["issues"]),
+                    }
+                )
+                if audit["issues"]:
+                    result.reply += " 复查发现：" + "；".join(audit["issues"])
         if result.reply != reply_before_audit:
             self.memory.replace_last_assistant(result.session_id, result.reply)
         return result

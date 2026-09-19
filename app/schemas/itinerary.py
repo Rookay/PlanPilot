@@ -10,6 +10,7 @@ from app.integrations.maps.schemas import Coordinate, TravelMode as RouteMode
 from app.schemas.event import TravelMode as EventTravelMode
 
 ItineraryMode = Literal["smart", "walking", "driving", "transit"]
+ItineraryOriginStrategy = Literal["automatic", "default", "selected"]
 
 
 class ItineraryLocation(BaseModel):
@@ -63,7 +64,9 @@ class DailyItineraryResponse(BaseModel):
     include_return: bool = False
     car_available: bool = False
     parking_minutes: int = 10
+    origin_strategy: ItineraryOriginStrategy = "automatic"
     origin: Optional[ItineraryLocation] = None
+    destination: Optional[ItineraryLocation] = None
     items: List[ItineraryItem] = Field(default_factory=list)
     legs: List[ItineraryLeg] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)

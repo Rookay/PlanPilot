@@ -20,10 +20,16 @@ from tests.helpers import make_session
 
 class AgentLoopTests(TestCase):
     def setUp(self):
+        self.time_patcher = patch(
+            "app.services.time_policy.utcnow",
+            return_value=datetime(2026, 9, 15),
+        )
+        self.time_patcher.start()
         self.db = make_session()
 
     def tearDown(self):
         self.db.close()
+        self.time_patcher.stop()
 
     def test_urgent_paper_request_completes_multistep_flow_offline(self):
         paper = task_service.create_task(
@@ -179,6 +185,13 @@ class AgentLoopTests(TestCase):
         self.assertEqual(skill.name, "travel_planning")
         self.assertIn("禁止调用 generate_plan", skill.system_hint)
 
+    def test_date_comparison_selects_compact_recommendation_skill(self):
+        skill = build_default_skills().select("下周我想开车回家，哪天比较合适")
+
+        self.assertIsNotNone(skill)
+        self.assertEqual(skill.name, "date_recommendation")
+        self.assertIn("禁止逐日查询", skill.system_hint)
+
     def test_travel_itinerary_is_confirmed_and_created_as_one_batch(self):
         events = [
             {
@@ -243,8 +256,13 @@ class AgentLoopTests(TestCase):
         self.assertEqual(len(pending.confirmation.preview["events"]), 3)
         self.assertEqual(event_service.list_events(self.db), [])
         with patch(
-            "app.agent.agent.schedule_service.audit_current_plan",
-            return_value={"valid": True, "issues": [], "warnings": []},
+            "app.agent.agent.schedule_service.audit_applied_changes",
+            return_value={
+                "valid": True,
+                "issues": [],
+                "warnings": [],
+                "audited": True,
+            },
         ):
             completed = agent.handle(
                 self.db,

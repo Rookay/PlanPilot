@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.schedule import Schedule
 from app.models.task import Task, TaskDependency
 from app.schemas.task import TaskCreate, TaskUpdate
-from app.services import location_service
+from app.services import location_service, time_policy
 from app.utils import to_naive_utc
 
 
@@ -27,6 +27,8 @@ def _normalize_task_times(data: dict) -> dict:
 
 def create_task(db: Session, data: TaskCreate) -> Task:
     values = _normalize_task_times(data.model_dump())
+    time_policy.ensure_not_past(values.get("start_time"))
+    time_policy.ensure_not_past(values.get("deadline"), "截止时间")
     dependency_ids = values.pop("dependency_ids", [])
     _validate_location(db, values.get("location_id"))
     _validate_coordinates(values.get("location_longitude"), values.get("location_latitude"))
@@ -81,6 +83,10 @@ def update_task(db: Session, task_id: int, data: TaskUpdate) -> Task:
     task = get_task(db, task_id)
 
     update_data = _normalize_task_times(data.model_dump(exclude_unset=True))
+    if "start_time" in update_data:
+        time_policy.ensure_not_past(update_data["start_time"])
+    if "deadline" in update_data:
+        time_policy.ensure_not_past(update_data["deadline"], "截止时间")
     dependency_ids = update_data.pop("dependency_ids", None)
     if "location_id" in update_data:
         _validate_location(db, update_data["location_id"])

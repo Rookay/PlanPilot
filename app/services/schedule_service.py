@@ -4,6 +4,7 @@
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import zip_longest
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from fastapi import HTTPException
@@ -43,13 +44,13 @@ from app.schemas.schedule import (
     ScheduleUpdate,
     UnscheduledTask,
 )
-from app.services import plan_version_service, preference_service
+from app.services import plan_version_service, preference_service, time_policy
 from app.services.travel_planning_service import (
     LocatedBlock,
     PlanningLocation,
     TravelConstraintChecker,
 )
-from app.utils import to_naive_utc, utcnow
+from app.utils import to_naive_utc
 
 IntervalTuple = Tuple[datetime, datetime]
 
@@ -85,6 +86,7 @@ def create_schedule(
         raise HTTPException(status_code=404, detail="Task not found")
 
     start_time, end_time = _normalize_range(start_time, end_time)
+    time_policy.ensure_not_past(start_time)
     _ensure_slot_available(db, start_time, end_time)
     version = plan_version_service.begin_version(db, "manual_create", "手动创建任务安排")
     schedule = Schedule(
@@ -114,10 +116,13 @@ def generate_schedules(
     batch_id = uuid.uuid4().hex[:16]
     version = plan_version_service.begin_version(db, "generate", "自动生成任务安排")
 
-    # 先完整计算，再替换旧提议，避免计算失败时丢失已有计划。
+    # 先完整计算，再只替换当前规划范围内的旧提议。
+    scope_start, scope_end = _planning_scope(context)
     db.query(Schedule).filter(
         Schedule.status == "proposed",
         Schedule.is_locked.is_(False),
+        Schedule.end_time > scope_start,
+        Schedule.start_time < scope_end,
     ).delete(
         synchronize_session=False
     )
@@ -158,6 +163,28 @@ def preview_plan(db: Session, payload: ScheduleGenerateRequest) -> dict:
 
     context = _build_context(db, payload)
     result = _run_plan(context)
+    scope_start, scope_end = _planning_scope(context)
+    current = (
+        db.query(Schedule)
+        .filter(
+            Schedule.status == "proposed",
+            Schedule.is_locked.is_(False),
+            Schedule.end_time > scope_start,
+            Schedule.start_time < scope_end,
+        )
+        .order_by(Schedule.start_time, Schedule.id)
+        .all()
+    )
+    preserved_count = (
+        db.query(Schedule)
+        .filter(
+            Schedule.status.in_(("accepted", "proposed")),
+            or_(Schedule.status == "accepted", Schedule.is_locked.is_(True)),
+            Schedule.end_time > scope_start,
+            Schedule.start_time < scope_end,
+        )
+        .count()
+    )
     return {
         "schedules": [
             {
@@ -170,6 +197,15 @@ def preview_plan(db: Session, payload: ScheduleGenerateRequest) -> dict:
         ],
         "unscheduled": [item.model_dump() for item in _unscheduled(result)],
         "analysis": _analysis(result, context).model_dump(),
+        "scope": {
+            "start": scope_start.isoformat() + "Z",
+            "end": scope_end.isoformat() + "Z",
+        },
+        "comparison": _build_plan_comparison(
+            current,
+            result.assignments,
+            preserved_count=preserved_count,
+        ),
     }
 
 
@@ -180,6 +216,7 @@ def accept_all_schedules(db: Session, batch_id: str | None = None) -> dict:
     schedules = query.order_by(Schedule.start_time).all()
 
     for schedule in schedules:
+        time_policy.ensure_not_past(schedule.start_time)
         _ensure_slot_available(
             db,
             schedule.start_time,
@@ -230,6 +267,10 @@ def update_schedule(db: Session, schedule_id: int, payload: ScheduleUpdate) -> S
     )
     next_status = update_data.get("status", schedule.status)
     changes_time = start != schedule.start_time or end != schedule.end_time
+    if changes_time or (
+        next_status in {"proposed", "accepted"} and next_status != schedule.status
+    ):
+        time_policy.ensure_not_past(start)
     if schedule.is_locked and changes_time:
         raise HTTPException(status_code=409, detail="该日程已锁定，请先解锁再调整时间")
     if next_status in {"proposed", "accepted"}:
@@ -280,7 +321,7 @@ def find_free_slots(
     min_duration_minutes: int = 30,
 ) -> List[IntervalTuple]:
     prefs = preference_service.get_preferences(db)
-    start = to_naive_utc(start)
+    start = time_policy.clamp_to_now(start)
     windows = build_local_work_windows(start, days, prefs)
     busy = _busy_intervals(db, include_proposed=True) + lunch_intervals(windows, prefs)
     return engine_find_free_slots(
@@ -322,6 +363,7 @@ def preview_schedule_update(
     )
     conflicts: List[str] = []
     try:
+        time_policy.ensure_not_past(start)
         _ensure_slot_available(db, start, end, exclude_schedule_id=schedule_id)
     except HTTPException as exc:
         conflicts.append(str(exc.detail))
@@ -365,6 +407,11 @@ def local_replan_preview(db: Session, payload: LocalReplanRequest) -> dict:
         "proposed": [_assignment_dict(item) for item in result.assignments],
         "unscheduled": [item.model_dump() for item in _unscheduled(result)],
         "analysis": _analysis(result, context).model_dump(),
+        "comparison": _build_plan_comparison(
+            movable,
+            result.assignments,
+            preserved_count=_locked_schedule_count(db, payload),
+        ),
     }
 
 
@@ -471,8 +518,50 @@ def check_conflicts(db: Session) -> List[Conflict]:
     return engine_check_conflicts(intervals)
 
 
-def audit_current_plan(db: Session) -> dict:
-    conflicts = check_conflicts(db)
+def audit_current_plan(
+    db: Session,
+    focus_event_ids: Optional[set[int]] = None,
+    focus_schedule_ids: Optional[set[int]] = None,
+) -> dict:
+    """复查当前计划；给定范围时只报告与本次变更直接相关的冲突。"""
+
+    scoped = focus_event_ids is not None or focus_schedule_ids is not None
+    focus_event_ids = focus_event_ids or set()
+    focus_schedule_ids = focus_schedule_ids or set()
+
+    intervals: List[Interval] = []
+    focused_intervals: set[int] = set()
+    for event in db.query(Event).all():
+        interval = Interval(
+            event.id,
+            f"事件：{event.title}",
+            to_naive_utc(event.start_time),
+            to_naive_utc(event.end_time),
+        )
+        intervals.append(interval)
+        if event.id in focus_event_ids:
+            focused_intervals.add(id(interval))
+    for schedule in db.query(Schedule).filter(
+        Schedule.status.in_(("accepted", "proposed"))
+    ).all():
+        interval = Interval(
+            schedule.id,
+            f"日程#{schedule.id}（任务#{schedule.task_id}）",
+            to_naive_utc(schedule.start_time),
+            to_naive_utc(schedule.end_time),
+        )
+        intervals.append(interval)
+        if schedule.id in focus_schedule_ids:
+            focused_intervals.add(id(interval))
+
+    conflicts = engine_check_conflicts(intervals)
+    if scoped:
+        conflicts = [
+            item
+            for item in conflicts
+            if id(item.first) in focused_intervals
+            or id(item.second) in focused_intervals
+        ]
     time_issues = [
         f"{item.first.title} 与 {item.second.title} 重叠 {item.overlap_minutes} 分钟"
         for item in conflicts
@@ -482,21 +571,69 @@ def audit_current_plan(db: Session) -> dict:
         map_service = get_map_service()
     except MapIntegrationError:
         map_service = None
+    fixed_blocks = _fixed_travel_blocks(
+        db,
+        locations,
+        schedule_statuses=("accepted", "proposed"),
+    )
     checker = TravelConstraintChecker(
         map_service=map_service,
-        fixed_blocks=_fixed_travel_blocks(
-            db,
-            locations,
-            schedule_statuses=("accepted", "proposed"),
-        ),
+        fixed_blocks=fixed_blocks,
         task_locations=_task_locations(db, locations),
     )
-    travel_issues = checker.sequence_issues([])
+    focus_keys = None
+    if scoped:
+        focus_keys = {
+            *(f"event-{item_id}" for item_id in focus_event_ids),
+            *(f"schedule-{item_id}" for item_id in focus_schedule_ids),
+        }
+    travel_issues = checker.sequence_issues([], focus_keys=focus_keys)
     return {
         "valid": not time_issues and not travel_issues,
         "issues": list(dict.fromkeys(time_issues + travel_issues)),
         "warnings": checker.warnings,
+        "audited": bool(focus_keys) if scoped else True,
     }
+
+
+def audit_applied_changes(db: Session, changes: List[dict]) -> dict:
+    """从工具结果提取受影响记录，仅复查本次 Agent 操作的范围。"""
+
+    event_ids: set[int] = set()
+    schedule_ids: set[int] = set()
+    task_ids: set[int] = set()
+
+    for change in changes:
+        name = str(change.get("name") or "")
+        data = change.get("data")
+        if not isinstance(data, dict):
+            continue
+        for event in data.get("events") or []:
+            if isinstance(event, dict) and isinstance(event.get("id"), int):
+                event_ids.add(event["id"])
+        for schedule in data.get("schedules") or []:
+            if isinstance(schedule, dict) and isinstance(schedule.get("id"), int):
+                schedule_ids.add(schedule["id"])
+        record_id = data.get("id")
+        if isinstance(record_id, int):
+            if "event" in name:
+                event_ids.add(record_id)
+            elif "schedule" in name:
+                schedule_ids.add(record_id)
+            elif "task" in name:
+                task_ids.add(record_id)
+
+    if task_ids:
+        schedule_ids.update(
+            item.id
+            for item in db.query(Schedule)
+            .filter(
+                Schedule.task_id.in_(task_ids),
+                Schedule.status.in_(("accepted", "proposed")),
+            )
+            .all()
+        )
+    return audit_current_plan(db, event_ids, schedule_ids)
 
 
 def evaluate_plan_dry_run(db: Session, payload: ScheduleGenerateRequest) -> Evaluation:
@@ -519,9 +656,18 @@ def _build_context(
     excluded_schedule_ids: Optional[set[int]] = None,
     task_ids: Optional[set[int]] = None,
 ) -> PlanningContext:
-    start = to_naive_utc(payload.start) or utcnow()
+    start = time_policy.clamp_to_now(payload.start)
     prefs = preference_service.get_preferences(db)
-    windows = _payload_windows(payload) or build_local_work_windows(start, payload.days, prefs)
+    requested_windows = _payload_windows(payload)
+    windows = (
+        [
+            (max(window_start, start), window_end)
+            for window_start, window_end in requested_windows
+            if window_end > start and max(window_start, start) < window_end
+        ]
+        if requested_windows
+        else build_local_work_windows(start, payload.days, prefs)
+    )
     if not windows:
         raise HTTPException(status_code=400, detail="规划时间窗口为空")
 
@@ -802,6 +948,9 @@ def _prepare_local_replan(
     payload: LocalReplanRequest,
 ) -> tuple[List[Schedule], PlanResult, PlanningContext]:
     start, end = _normalize_range(payload.start, payload.end)
+    start = time_policy.clamp_to_now(start)
+    if end <= start:
+        raise HTTPException(status_code=400, detail="局部重排时间范围已经结束")
     movable = (
         db.query(Schedule)
         .filter(
@@ -902,6 +1051,70 @@ def _assignment_dict(assignment) -> dict:
     }
 
 
+def _planning_scope(context: PlanningContext) -> IntervalTuple:
+    return (
+        min(start for start, _ in context.windows),
+        max(end for _, end in context.windows),
+    )
+
+
+def _build_plan_comparison(
+    current: Iterable[Schedule],
+    proposed: Iterable[PlanAssignment],
+    *,
+    preserved_count: int = 0,
+) -> dict:
+    """按任务和分段顺序对齐旧、新方案，生成可解释的差异。"""
+
+    current_by_task: Dict[int, List[Schedule]] = {}
+    for item in current:
+        current_by_task.setdefault(item.task_id, []).append(item)
+    proposed_by_task: Dict[int, List[PlanAssignment]] = {}
+    for item in proposed:
+        proposed_by_task.setdefault(item.task_id, []).append(item)
+
+    changes = []
+    counts = {"added": 0, "removed": 0, "moved": 0, "unchanged": 0}
+    for task_id in sorted(set(current_by_task) | set(proposed_by_task)):
+        before_items = sorted(
+            current_by_task.get(task_id, []),
+            key=lambda item: (item.start_time, item.end_time, item.id),
+        )
+        after_items = sorted(
+            proposed_by_task.get(task_id, []),
+            key=lambda item: (item.start_time, item.end_time, item.chunk_index),
+        )
+        for before, after in zip_longest(before_items, after_items):
+            before_data = _schedule_dict(before) if before is not None else None
+            after_data = _assignment_dict(after) if after is not None else None
+            if before is None:
+                change_type = "added"
+            elif after is None:
+                change_type = "removed"
+            elif (
+                before.start_time == after.start_time
+                and before.end_time == after.end_time
+            ):
+                change_type = "unchanged"
+            else:
+                change_type = "moved"
+            counts[change_type] += 1
+            changes.append(
+                {
+                    "type": change_type,
+                    "task_id": task_id,
+                    "before": before_data,
+                    "after": after_data,
+                    "reason": after.reason if after is not None else "当前范围不再适合该安排",
+                }
+            )
+
+    return {
+        "counts": {**counts, "preserved": preserved_count},
+        "changes": changes,
+    }
+
+
 def _normalize_range(start: datetime, end: datetime) -> IntervalTuple:
     start, end = to_naive_utc(start), to_naive_utc(end)
     if start is None or end is None or end <= start:
@@ -919,7 +1132,13 @@ def _analysis(result: PlanResult, context: PlanningContext) -> PlanAnalysis:
         result.failures,
         {task.id: task for task in context.tasks},
     )
-    travel_issues = context.travel_checker.sequence_issues(result.assignments)
+    # A plan result should only describe the schedules it just produced. Full-calendar
+    # conflict inspection remains available through the dedicated conflict checker.
+    focus_keys = {f"task-{assignment.task_id}" for assignment in result.assignments}
+    travel_issues = context.travel_checker.sequence_issues(
+        result.assignments,
+        focus_keys=focus_keys,
+    )
     issues = evaluation.issues + travel_issues + context.travel_checker.warnings
     score = max(0, evaluation.score - 15 * len(travel_issues))
     return PlanAnalysis(

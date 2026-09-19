@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from unittest import TestCase
+from unittest.mock import patch
 import warnings
 
 from fastapi import FastAPI
@@ -17,6 +18,11 @@ from tests.helpers import make_session
 
 class ApiWorkflowTests(TestCase):
     def setUp(self):
+        self.time_patcher = patch(
+            "app.services.time_policy.utcnow",
+            return_value=datetime(2026, 9, 15),
+        )
+        self.time_patcher.start()
         self.db = make_session()
         application = FastAPI()
         for router in (
@@ -38,6 +44,7 @@ class ApiWorkflowTests(TestCase):
     def tearDown(self):
         self.client.close()
         self.db.close()
+        self.time_patcher.stop()
 
     def test_task_plan_and_batch_accept_workflow(self):
         preference_response = self.client.put(

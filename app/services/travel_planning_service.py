@@ -128,9 +128,11 @@ class TravelConstraintChecker:
         return blocks
 
     def sequence_issues(
-        self, assignments: Sequence[PlanAssignment]
+        self,
+        assignments: Sequence[PlanAssignment],
+        focus_keys: Optional[set[str]] = None,
     ) -> List[str]:
-        """复核最终顺序，也会报告两个固定行程之间的通勤冲突。"""
+        """复核最终顺序；传入 focus_keys 时只验证与本次变更相邻的路段。"""
 
         blocks = sorted(
             self.fixed_blocks + self.assignment_blocks(assignments),
@@ -138,6 +140,10 @@ class TravelConstraintChecker:
         )
         issues: List[str] = []
         for previous, following in zip(blocks, blocks[1:]):
+            if focus_keys is not None and not (
+                previous.key in focus_keys or following.key in focus_keys
+            ):
+                continue
             departure = (
                 max(previous.end, following.start)
                 if following.travel

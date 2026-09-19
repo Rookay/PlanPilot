@@ -227,7 +227,11 @@ class AgentLoop:
 
                 if result.success and tool.confirmation != "none":
                     applied_changes.append(
-                        {"name": call.name, "summary": result.summary}
+                        {
+                            "name": call.name,
+                            "summary": result.summary,
+                            "data": result.data,
+                        }
                     )
                     if (
                         call.name in ("generate_plan", "replan")
