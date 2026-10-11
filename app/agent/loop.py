@@ -4,6 +4,8 @@
 """Agent Loop：LLM 决策 + 工具执行 + 结果观察 的循环。"""
 
 import json
+import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -14,9 +16,23 @@ from app.agent.confirmation import PendingActionStore
 from app.agent.context import build_system_prompt, build_world_summary
 from app.agent.memory import Memory
 from app.llm.base import LLMProvider
+from app.llm.exceptions import (
+    LLMAuthError,
+    LLMRateLimitError,
+    LLMTransientError,
+)
 from app.llm.mock import MockProvider
 from app.skills.base import SkillRegistry
 from app.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
+
+
+# 状态字符串常量 —— 给 /api/agent/status 和前端用作稳定标签。
+STATE_OK = "ok"
+STATE_TRANSIENT = "transient_fallback"
+STATE_RATE_LIMITED = "rate_limited"
+STATE_AUTH_FAILED = "auth_failed"
 
 
 @dataclass
@@ -38,10 +54,34 @@ class AgentResult:
     confirmation: ConfirmationInfo = field(default_factory=ConfirmationInfo)
 
 
+@dataclass
+class LLMStatus:
+    """LLM Provider 的运行状态,由 AgentLoop 维护并通过 /api/agent/status 暴露。
+
+    - state 取值:
+        "ok"                 —— 真实 LLM 正常(或从未出过错)
+        "transient_fallback" —— 上次失败是 5xx / 网络 / 超时,按指数退避中
+        "rate_limited"       —— 上次失败是 429,按指数退避中
+        "auth_failed"        —— 上次失败是 401 / 403,永久禁用直到进程重启
+    - fallback_until 是 ``time.monotonic()`` 时刻;``float("inf")`` 表示永不复原。
+    """
+
+    state: str = STATE_OK
+    consecutive_failures: int = 0
+    last_error_type: Optional[str] = None  # auth / rate_limit / transient
+    last_error_message: Optional[str] = None
+    last_success_at: Optional[float] = None
+    fallback_until: float = 0.0
+
+
 class AgentLoop:
     MAX_ITERATIONS = 12
     MAX_TOOL_CALLS = 24
-    FALLBACK_COOLDOWN_SECONDS = 60
+
+    # 指数退避参数:第 N 次失败的等待 = clamp(BASE * 2^(N-1), 0, MAX) + jitter
+    BACKOFF_BASE_SECONDS = 60
+    BACKOFF_MAX_SECONDS = 600
+    BACKOFF_JITTER_RATIO = 0.2
 
     def __init__(
         self,
@@ -57,8 +97,7 @@ class AgentLoop:
         self.confirmation_store = confirmation_store
         self.skill_registry = skill_registry
         self.fallback_provider = MockProvider()
-        self.fallback_until = 0.0
-        self.last_provider_error: Optional[str] = None
+        self.llm_status = LLMStatus()
 
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
         self.memory.add(session_id, "user", message)
@@ -72,28 +111,44 @@ class AgentLoop:
         seen_calls: set[str] = set()
 
         for _ in range(self.MAX_ITERATIONS):
+            provider = self._pick_provider()
+            used_real = provider is self.llm
             try:
-                provider = (
-                    self.fallback_provider
-                    if time.monotonic() < self.fallback_until
-                    else self.llm
-                )
                 response = provider.chat(messages, tools=self.registry.schemas())
-            except Exception as exc:  # noqa: BLE001
-                self.last_provider_error = str(exc)
-                self.fallback_until = time.monotonic() + self.FALLBACK_COOLDOWN_SECONDS
+            except LLMAuthError as exc:
+                logger.exception("LLM 鉴权失败,已永久禁用真模型:%s", exc)
+                self._mark_auth_failed(exc)
                 messages.append(
                     {
                         "role": "system",
                         "content": (
-                            "真实模型暂时不可用，已切换到本地规则模式。"
-                            f"错误摘要：{exc}"
+                            "真实模型鉴权失败,已永久切换到本地规则模式。"
+                            f"错误摘要:{exc}"
                         ),
                     }
                 )
                 response = self.fallback_provider.chat(
                     messages, tools=self.registry.schemas()
                 )
+            except (LLMRateLimitError, LLMTransientError) as exc:
+                kind = "rate_limit" if isinstance(exc, LLMRateLimitError) else "transient"
+                logger.warning("LLM %s,触发退避:%s", kind, exc)
+                self._mark_failure(kind, exc)
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "真实模型暂时不可用,已切换到本地规则模式。"
+                            f"错误摘要:{exc}"
+                        ),
+                    }
+                )
+                response = self.fallback_provider.chat(
+                    messages, tools=self.registry.schemas()
+                )
+            else:
+                if used_real:
+                    self._record_success()
 
             if response.is_text() or not response.tool_calls:
                 reply = response.text or "（模型未返回内容）"
@@ -216,6 +271,7 @@ class AgentLoop:
                     else {"items": pending_previews}
                 )
                 action_id = self.confirmation_store.create(
+                    db,
                     tool_calls=pending_confirm_calls,
                     summary=confirmation_summary,
                     preview=combined_preview,
@@ -279,6 +335,51 @@ class AgentLoop:
         messages: List[dict] = [{"role": "system", "content": system}]
         messages.extend(self.memory.recent(session_id))
         return messages
+
+    def _pick_provider(self) -> LLMProvider:
+        """根据 ``llm_status`` 决定本次循环用真实 LLM 还是本地 MockProvider。"""
+
+        if (
+            self.llm_status.state != STATE_OK
+            and time.monotonic() < self.llm_status.fallback_until
+        ):
+            return self.fallback_provider
+        return self.llm
+
+    def _mark_failure(self, error_type: str, error: Exception) -> None:
+        """记录一次可恢复的失败(rate_limit / transient),推进指数退避。"""
+
+        self.llm_status.consecutive_failures += 1
+        self.llm_status.state = (
+            STATE_RATE_LIMITED if error_type == "rate_limit" else STATE_TRANSIENT
+        )
+        self.llm_status.last_error_type = error_type
+        self.llm_status.last_error_message = str(error)
+
+        base_delay = self.BACKOFF_BASE_SECONDS * (
+            2 ** (self.llm_status.consecutive_failures - 1)
+        )
+        delay = min(base_delay, self.BACKOFF_MAX_SECONDS)
+        jitter = random.uniform(0, delay * self.BACKOFF_JITTER_RATIO)
+        self.llm_status.fallback_until = time.monotonic() + delay + jitter
+
+    def _mark_auth_failed(self, error: Exception) -> None:
+        """鉴权失败:不设 fallback_until(即不自动恢复),直到进程重启。"""
+
+        self.llm_status.state = STATE_AUTH_FAILED
+        self.llm_status.last_error_type = "auth"
+        self.llm_status.last_error_message = str(error)
+        self.llm_status.fallback_until = float("inf")
+
+    def _record_success(self) -> None:
+        """真实 LLM 成功调用一次:重置失败计数与退避计时。"""
+
+        self.llm_status.state = STATE_OK
+        self.llm_status.consecutive_failures = 0
+        self.llm_status.last_error_type = None
+        self.llm_status.last_error_message = None
+        self.llm_status.fallback_until = 0.0
+        self.llm_status.last_success_at = time.monotonic()
 
     def _assistant_message(self, response) -> dict:
         if response.raw_message is not None:

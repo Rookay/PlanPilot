@@ -13,12 +13,18 @@
 """
 
 import json
+import socket
 import urllib.error
 import urllib.request
 from typing import Optional
 
 from app.config import llm_config
 from app.llm.base import LLMProvider, LLMResponse, ToolCall
+from app.llm.exceptions import (
+    LLMAuthError,
+    LLMRateLimitError,
+    LLMTransientError,
+)
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -100,9 +106,15 @@ class OpenAICompatibleProvider(LLMProvider):
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"LLM 请求失败 {exc.code}: {detail}") from exc
+            if exc.code in (401, 403):
+                raise LLMAuthError(f"LLM 鉴权失败 {exc.code}: {detail}") from exc
+            if exc.code == 429:
+                raise LLMRateLimitError(f"LLM 限流 {exc.code}: {detail}") from exc
+            raise LLMTransientError(f"LLM 请求失败 {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM 连接失败: {exc.reason}") from exc
+            if isinstance(exc.reason, socket.timeout):
+                raise LLMTransientError(f"LLM 请求超时: {exc.reason}") from exc
+            raise LLMTransientError(f"LLM 连接失败: {exc.reason}") from exc
 
 
 def from_config() -> OpenAICompatibleProvider | None:

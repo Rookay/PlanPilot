@@ -10,6 +10,7 @@ from app.models.schedule import Schedule
 from app.models.chat import ChatMessage
 from app.models.preference import UserPreference
 from app.models.location import SavedLocation
+from app.models.pending_action import PendingAction
 
 __all__ = [
     "Task",
@@ -18,4 +19,5 @@ __all__ = [
     "ChatMessage",
     "UserPreference",
     "SavedLocation",
+    "PendingAction",
 ]

@@ -2498,10 +2498,30 @@ async function loadAgentStatus() {
     return;
   }
   const local = status.mode === "local" || status.fallback_active;
-  badge.textContent = local
-    ? "本地规则模式"
-    : `大模型 · ${status.model || "已连接"}`;
+  if (local) {
+    const label = llmErrorLabel(status.last_error_type);
+    badge.textContent = label
+      ? `本地规则模式 · ${label}`
+      : "本地规则模式";
+    badge.title = (status.last_error || "").slice(0, 120) || "";
+  } else {
+    badge.textContent = `大模型 · ${status.model || "已连接"}`;
+    badge.title = "";
+  }
   badge.className = `status-badge ${local ? "status-local" : "status-online"}`;
+}
+
+function llmErrorLabel(kind) {
+  switch (kind) {
+    case "auth":
+      return "鉴权失败";
+    case "rate_limit":
+      return "限流中";
+    case "transient":
+      return "网络异常";
+    default:
+      return "";
+  }
 }
 
 function renderAgentTrace(data) {

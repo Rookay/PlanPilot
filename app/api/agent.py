@@ -4,13 +4,13 @@
 """Agent 对话接口。"""
 
 import uuid
-import time
 from typing import List
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.agent.factory import agent
+from app.agent.loop import STATE_OK
 from app.database import get_db
 from app.models.chat import ChatMessage
 from app.schemas.agent import (
@@ -28,14 +28,23 @@ router = APIRouter(
 
 @router.get("/status")
 def agent_status():
-    provider = agent.loop.llm
-    is_fallback = provider.__class__.__name__ == "MockProvider"
+    status = agent.loop.llm_status
+    fallback_until = status.fallback_until
+    next_retry_at = (
+        None
+        if fallback_until == float("inf")
+        else (fallback_until if status.state != STATE_OK else None)
+    )
     return {
-        "mode": "local" if is_fallback else "llm",
-        "provider": provider.__class__.__name__,
-        "model": getattr(provider, "model", None),
-        "fallback_active": time.monotonic() < agent.loop.fallback_until,
-        "last_error": agent.loop.last_provider_error,
+        "mode": "llm" if status.state == STATE_OK else "local",
+        "provider": agent.loop.llm.__class__.__name__,
+        "model": getattr(agent.loop.llm, "model", None),
+        "state": status.state,
+        "last_error_type": status.last_error_type,
+        "last_error": status.last_error_message,
+        "fallback_active": status.state != STATE_OK,
+        "next_retry_at": next_retry_at,
+        "consecutive_failures": status.consecutive_failures,
         "max_iterations": agent.loop.MAX_ITERATIONS,
         "max_tool_calls": agent.loop.MAX_TOOL_CALLS,
     }
