@@ -13,6 +13,7 @@ from app.models.location import SavedLocation
 from app.models.plan_version import PlanVersion
 from app.models.agent_run import AgentRun
 from app.models.evaluation import EvaluationRun
+from app.models.pending_action import PendingAction
 
 __all__ = [
     "Task",
@@ -25,4 +26,5 @@ __all__ = [
     "PlanVersion",
     "AgentRun",
     "EvaluationRun",
+    "PendingAction",
 ]

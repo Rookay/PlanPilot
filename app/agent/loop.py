@@ -4,6 +4,8 @@
 """Agent Loop：LLM 决策 + 工具执行 + 结果观察 的循环。"""
 
 import json
+import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -14,9 +16,17 @@ from app.agent.confirmation import PendingActionStore
 from app.agent.context import build_system_prompt, build_world_summary
 from app.agent.memory import Memory
 from app.llm.base import LLMProvider
+from app.llm.exceptions import LLMAuthError, LLMRateLimitError, LLMTransientError
 from app.llm.mock import MockProvider
 from app.skills.base import SkillRegistry
 from app.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
+
+STATE_OK = "ok"
+STATE_TRANSIENT = "transient_fallback"
+STATE_RATE_LIMITED = "rate_limited"
+STATE_AUTH_FAILED = "auth_failed"
 
 
 @dataclass
@@ -43,6 +53,16 @@ class AgentResult:
     model_usage: dict = field(default_factory=dict)
 
 
+@dataclass
+class LLMStatus:
+    state: str = STATE_OK
+    consecutive_failures: int = 0
+    last_error_type: Optional[str] = None
+    last_error_message: Optional[str] = None
+    last_success_at: Optional[float] = None
+    fallback_until: float = 0.0
+
+
 class AgentLoop:
     MAX_ITERATIONS = 12
     MAX_TOOL_CALLS = 24
@@ -64,7 +84,9 @@ class AgentLoop:
         "geocode_address": 8,
         "estimate_travel_time": 12,
     }
-    FALLBACK_COOLDOWN_SECONDS = 15
+    BACKOFF_BASE_SECONDS = 60
+    BACKOFF_MAX_SECONDS = 600
+    BACKOFF_JITTER_RATIO = 0.2
 
     def __init__(
         self,
@@ -80,8 +102,7 @@ class AgentLoop:
         self.confirmation_store = confirmation_store
         self.skill_registry = skill_registry
         self.fallback_provider = MockProvider()
-        self.fallback_until = 0.0
-        self.last_provider_error: Optional[str] = None
+        self.llm_status = LLMStatus()
         self.last_run_provider: Optional[str] = None
 
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
@@ -110,12 +131,9 @@ class AgentLoop:
         provider = self.llm
 
         for _ in range(self.MAX_ITERATIONS):
+            provider = self._pick_provider()
+            used_real = provider is self.llm
             try:
-                provider = (
-                    self.fallback_provider
-                    if time.monotonic() < self.fallback_until
-                    else self.llm
-                )
                 self.last_run_provider = provider.__class__.__name__
                 response = provider.chat(
                     messages,
@@ -124,10 +142,52 @@ class AgentLoop:
                         active_tool_names,
                     ),
                 )
-                if provider is self.llm:
-                    self.mark_provider_available()
+                if used_real:
+                    self._record_success()
+            except LLMAuthError as exc:
+                logger.warning("LLM authentication failed: %s", exc)
+                self._mark_auth_failed(exc)
+                self.last_run_provider = self.fallback_provider.__class__.__name__
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "真实模型暂时不可用，已切换到本地规则模式。"
+                            f"错误摘要：{exc}"
+                        ),
+                    }
+                )
+                response = self.fallback_provider.chat(
+                    messages,
+                    tools=self._available_tool_schemas(
+                        saturated_tools,
+                        active_tool_names,
+                    ),
+                )
+            except (LLMRateLimitError, LLMTransientError) as exc:
+                kind = "rate_limit" if isinstance(exc, LLMRateLimitError) else "transient"
+                logger.warning("LLM %s, using fallback: %s", kind, exc)
+                self._mark_failure(kind, exc)
+                self.last_run_provider = self.fallback_provider.__class__.__name__
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "真实模型暂时不可用，已切换到本地规则模式。"
+                            f"错误摘要：{exc}"
+                        ),
+                    }
+                )
+                response = self.fallback_provider.chat(
+                    messages,
+                    tools=self._available_tool_schemas(
+                        saturated_tools,
+                        active_tool_names,
+                    ),
+                )
             except Exception as exc:  # noqa: BLE001
-                self.mark_provider_unavailable(exc)
+                logger.exception("Unexpected LLM error, using fallback")
+                self._mark_failure("transient", exc)
                 self.last_run_provider = self.fallback_provider.__class__.__name__
                 messages.append(
                     {
@@ -340,6 +400,7 @@ class AgentLoop:
                     else {"items": pending_previews}
                 )
                 action_id = self.confirmation_store.create(
+                    db=db,
                     tool_calls=pending_confirm_calls,
                     summary=confirmation_summary,
                     preview=combined_preview,
@@ -406,15 +467,60 @@ class AgentLoop:
         self.mark_provider_available()
 
     def mark_provider_available(self) -> None:
-        self.fallback_until = 0.0
-        self.last_provider_error = None
+        self._record_success()
 
     def mark_provider_unavailable(self, error: Exception | str) -> None:
-        self.last_provider_error = str(error)
-        self.fallback_until = time.monotonic() + self.FALLBACK_COOLDOWN_SECONDS
+        self._mark_failure(
+            "transient",
+            error if isinstance(error, Exception) else RuntimeError(error),
+        )
 
     def retry_after_seconds(self) -> int:
-        return max(0, int(self.fallback_until - time.monotonic() + 0.999))
+        if self.llm_status.fallback_until == float("inf"):
+            return 0
+        return max(
+            0,
+            int(self.llm_status.fallback_until - time.monotonic() + 0.999),
+        )
+
+    @property
+    def fallback_until(self) -> float:
+        return self.llm_status.fallback_until
+
+    @property
+    def last_provider_error(self) -> Optional[str]:
+        return self.llm_status.last_error_message
+
+    def _pick_provider(self) -> LLMProvider:
+        if (
+            self.llm_status.state != STATE_OK
+            and time.monotonic() < self.llm_status.fallback_until
+        ):
+            return self.fallback_provider
+        return self.llm
+
+    def _mark_failure(self, error_type: str, error: Exception) -> None:
+        status = self.llm_status
+        status.consecutive_failures += 1
+        status.state = (
+            STATE_RATE_LIMITED if error_type == "rate_limit" else STATE_TRANSIENT
+        )
+        status.last_error_type = error_type
+        status.last_error_message = str(error)
+        base_delay = self.BACKOFF_BASE_SECONDS * (2 ** (status.consecutive_failures - 1))
+        delay = min(base_delay, self.BACKOFF_MAX_SECONDS)
+        jitter = random.uniform(0, delay * self.BACKOFF_JITTER_RATIO)
+        status.fallback_until = time.monotonic() + delay + jitter
+
+    def _mark_auth_failed(self, error: Exception) -> None:
+        status = self.llm_status
+        status.state = STATE_AUTH_FAILED
+        status.last_error_type = "auth"
+        status.last_error_message = str(error)
+        status.fallback_until = float("inf")
+
+    def _record_success(self) -> None:
+        self.llm_status = LLMStatus(last_success_at=time.monotonic())
 
     # ------------------------------------------------------------------
 

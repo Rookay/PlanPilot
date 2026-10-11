@@ -3497,14 +3497,24 @@ async function loadAgentStatus() {
     return;
   }
   const disconnected = status.mode === "local" || status.fallback_active || Boolean(status.last_error);
+  const errorLabel = llmErrorLabel(status.last_error_type);
   badge.textContent = disconnected
     ? status.retry_after_seconds > 0
-      ? `连接异常 · ${status.retry_after_seconds} 秒后自动重试`
-      : "连接异常 · 可重新连接"
+      ? `${errorLabel || "连接异常"} · ${status.retry_after_seconds} 秒后自动重试`
+      : `${errorLabel || "连接异常"} · 可重新连接`
     : `大模型 · ${status.model || "已连接"}`;
   badge.title = status.last_error || "大模型连接正常";
   badge.className = `status-badge ${disconnected ? "status-local" : "status-online"}`;
   reconnectButton?.classList.toggle("hidden", !disconnected);
+}
+
+function llmErrorLabel(kind) {
+  const labels = {
+    auth: "鉴权失败",
+    rate_limit: "请求受限",
+    transient: "网络异常",
+  };
+  return labels[kind] || "";
 }
 
 async function reconnectAgent() {

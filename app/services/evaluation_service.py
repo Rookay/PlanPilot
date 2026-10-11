@@ -5,7 +5,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 
 from sqlalchemy import create_engine
@@ -24,6 +24,7 @@ from app.schemas.task import TaskCreate
 from app.services import event_service, schedule_service, task_service
 from app.skills.planner_skills import build_default_skills
 from app.tools.defaults import build_default_registry
+from app.utils import utcnow
 
 
 @dataclass(frozen=True)
@@ -281,13 +282,16 @@ def _prepare_scenario(db: Session, scenario_id: str):
         )
 
     if scenario_id == "batch_delete":
+        start_day = (utcnow() + timedelta(days=7)).replace(
+            hour=2, minute=0, second=0, microsecond=0
+        )
         events = [
             event_service.create_event(
                 db,
                 EventCreate(
                     title=title,
-                    start_time=datetime(2026, 10, 1 + index, 2),
-                    end_time=datetime(2026, 10, 1 + index, 3),
+                    start_time=start_day + timedelta(days=index),
+                    end_time=start_day + timedelta(days=index, hours=1),
                 ),
             )
             for index, title in enumerate(("出去玩", "上海行程第1天", "上海行程第2天"))
@@ -310,18 +314,25 @@ def _prepare_scenario(db: Session, scenario_id: str):
 
 
 def _sample_trip_payloads() -> list[dict]:
+    start = (utcnow() + timedelta(days=7)).replace(
+        hour=2, minute=0, second=0, microsecond=0
+    )
+
+    def timestamp(minutes: int) -> str:
+        return (start + timedelta(minutes=minutes)).isoformat() + "Z"
+
     return [
         {
             "title": "抵达马鞍山东站",
-            "start_time": "2026-09-27T02:00:00Z",
-            "end_time": "2026-09-27T02:10:00Z",
+            "start_time": timestamp(0),
+            "end_time": timestamp(10),
             "event_type": "activity",
             "location": "马鞍山东站",
         },
         {
             "title": "打车前往酒店",
-            "start_time": "2026-09-27T02:10:00Z",
-            "end_time": "2026-09-27T02:40:00Z",
+            "start_time": timestamp(10),
+            "end_time": timestamp(40),
             "event_type": "travel",
             "travel_mode": "taxi",
             "origin_location": "马鞍山东站",
@@ -329,8 +340,8 @@ def _sample_trip_payloads() -> list[dict]:
         },
         {
             "title": "酒店寄存行李",
-            "start_time": "2026-09-27T02:40:00Z",
-            "end_time": "2026-09-27T03:00:00Z",
+            "start_time": timestamp(40),
+            "end_time": timestamp(60),
             "event_type": "activity",
             "location": "酒店",
         },

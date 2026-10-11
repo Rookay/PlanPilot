@@ -60,7 +60,7 @@ class Agent:
         decision: str,
         session_id: str,
     ) -> AgentResult:
-        pending = self.confirmation_store.get(action_id, session_id)
+        pending = self.confirmation_store.get(db, action_id, session_id)
         if pending is None:
             result = AgentResult(
                 reply="该确认请求不存在或已过期，请重新发起操作。",
@@ -70,7 +70,7 @@ class Agent:
             return result
 
         if decision == "reject":
-            self.confirmation_store.remove(action_id)
+            self.confirmation_store.remove(db, action_id)
             result = AgentResult(reply="已取消该操作。", session_id=session_id)
             self.memory.add(session_id, "assistant", result.reply)
             return result
@@ -114,7 +114,7 @@ class Agent:
                 errors.append(result.error or f"{call['name']} 执行失败")
                 break
 
-        self.confirmation_store.remove(action_id)
+        self.confirmation_store.remove(db, action_id)
 
         if errors:
             snapshot.restore(db)

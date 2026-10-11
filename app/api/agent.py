@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.agent.factory import agent, reconnect_agent
+from app.agent.loop import STATE_OK
 from app.config import llm_config
 from app.database import get_db
 from app.models.chat import ChatMessage
@@ -31,13 +32,21 @@ router = APIRouter(
 @router.get("/status")
 def agent_status():
     provider = agent.loop.llm
-    is_fallback = provider.__class__.__name__ == "MockProvider"
+    status = agent.loop.llm_status
     return {
-        "mode": "local" if is_fallback else "llm",
+        "mode": "llm" if status.state == STATE_OK else "local",
         "provider": provider.__class__.__name__,
         "model": getattr(provider, "model", None),
-        "fallback_active": time.monotonic() < agent.loop.fallback_until,
-        "last_error": agent.loop.last_provider_error,
+        "state": status.state,
+        "last_error_type": status.last_error_type,
+        "last_error": status.last_error_message,
+        "fallback_active": status.state != STATE_OK,
+        "next_retry_at": (
+            None
+            if status.state == STATE_OK or status.fallback_until == float("inf")
+            else status.fallback_until
+        ),
+        "consecutive_failures": status.consecutive_failures,
         "retry_after_seconds": agent.loop.retry_after_seconds(),
         "max_iterations": agent.loop.MAX_ITERATIONS,
         "max_tool_calls": agent.loop.MAX_TOOL_CALLS,

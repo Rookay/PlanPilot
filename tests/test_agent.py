@@ -193,6 +193,7 @@ class AgentLoopTests(TestCase):
             skill_registry=build_default_skills(),
         )
         action_id = agent.confirmation_store.create(
+            self.db,
             tool_calls=[
                 {"name": "delete_event", "args": {"event_id": event.id}},
                 {"name": "delete_event", "args": {"event_id": 99999}},

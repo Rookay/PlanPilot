@@ -14,12 +14,14 @@
 
 import json
 import os
+import socket
 import urllib.error
 import urllib.request
 from typing import Optional
 
 from app.config import llm_config
 from app.llm.base import LLMProvider, LLMResponse, ToolCall
+from app.llm.exceptions import LLMAuthError, LLMRateLimitError, LLMTransientError
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -110,7 +112,7 @@ class OpenAICompatibleProvider(LLMProvider):
             raise self._http_error(exc) from exc
         except urllib.error.URLError as proxy_error:
             if not _has_environment_proxy():
-                raise RuntimeError(f"LLM 连接失败: {proxy_error.reason}") from proxy_error
+                raise _url_error(proxy_error) from proxy_error
 
             # 某些启动环境会注入已经失效的代理。代理连接失败时再直连一次，
             # 既不影响正常代理，也避免模型永久降级成本地规则。
@@ -120,7 +122,7 @@ class OpenAICompatibleProvider(LLMProvider):
             except urllib.error.HTTPError as exc:
                 raise self._http_error(exc) from exc
             except urllib.error.URLError as direct_error:
-                raise RuntimeError(
+                raise LLMTransientError(
                     "LLM 连接失败：环境代理不可用，直连也失败："
                     f"{direct_error.reason}"
                 ) from direct_error
@@ -132,7 +134,17 @@ class OpenAICompatibleProvider(LLMProvider):
     @staticmethod
     def _http_error(exc: urllib.error.HTTPError) -> RuntimeError:
         detail = exc.read().decode("utf-8", errors="replace")
-        return RuntimeError(f"LLM 请求失败 {exc.code}: {detail}")
+        if exc.code in (401, 403):
+            return LLMAuthError(f"LLM 鉴权失败 {exc.code}: {detail}")
+        if exc.code == 429:
+            return LLMRateLimitError(f"LLM 限流 {exc.code}: {detail}")
+        return LLMTransientError(f"LLM 请求失败 {exc.code}: {detail}")
+
+
+def _url_error(exc: urllib.error.URLError) -> LLMTransientError:
+    if isinstance(exc.reason, socket.timeout):
+        return LLMTransientError(f"LLM 请求超时: {exc.reason}")
+    return LLMTransientError(f"LLM 连接失败: {exc.reason}")
 
 
 def _has_environment_proxy() -> bool:
