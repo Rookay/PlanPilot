@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>日程规划助手</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=20261011-base">
 </head>
 
 <body>
@@ -421,7 +421,7 @@
                 </button>
 
                 <button class="ghost-button" onclick="loadPlanAlternatives()">
-                    多方案对比
+                    生成多个方案
                 </button>
 
                 <button id="acceptAllButton" class="ghost-button" onclick="acceptAllSchedules()">
@@ -446,7 +446,7 @@
             <div id="planAnalysis" class="plan-analysis hidden"></div>
             <section id="planAlternatives" class="plan-alternatives hidden">
                 <div class="plan-alternatives-header">
-                    <div><span>深度优化</span><h3>选择规划方案</h3></div>
+                    <div><span>多方案决策</span><h3>选择一套计划</h3></div>
                     <button class="modal-close-button" type="button" aria-label="关闭多方案对比" onclick="closePlanAlternatives()">×</button>
                 </div>
                 <div id="planAlternativesGrid" class="plan-alternatives-grid"></div>
@@ -899,7 +899,7 @@
 <script>window.API_URL = "http://192.168.1.50:8000/api";</script>
 -->
 
-<script src="app.js"></script>
+<script src="app.js?v=20261011-base"></script>
 
 </body>
 </html>
