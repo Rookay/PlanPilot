@@ -30,6 +30,8 @@ const state = {
   events: [],
   schedules: [],
   weekStart: null,
+  calendarStart: null,
+  calendarRangeMode: "upcoming",
   editingTaskId: null,
   editingEventId: null,
   chatMessages: [],
@@ -2083,22 +2085,31 @@ function renderTimetables() {
 
 function updateWeekLabels() {
   const weekStart = state.weekStart || startOfWeek(new Date());
-  const text =
+  const weekText =
     `${weekStart.getFullYear()}年 ${formatDate(weekStart)} - ` +
     `${formatDate(addDays(weekStart, 6))}`;
+  const calendarStart = state.calendarStart || startOfDay(new Date());
+  const calendarText =
+    `${calendarStart.getFullYear()}年 ${formatDate(calendarStart)} - ` +
+    `${formatDate(addDays(calendarStart, 6))}`;
 
-  document.querySelectorAll(".week-label").forEach((label) => {
-    label.textContent = text;
+  $("planning")?.querySelectorAll(".week-label").forEach((label) => {
+    label.textContent = weekText;
+  });
+  $("calendar")?.querySelectorAll(".week-label").forEach((label) => {
+    label.textContent = calendarText;
   });
 }
 
 function renderTimetable(host) {
-  const weekStart = state.weekStart || startOfWeek(new Date());
+  const rangeStart = host.id === "calendarGrid"
+    ? state.calendarStart || startOfDay(new Date())
+    : state.weekStart || startOfWeek(new Date());
   const today = startOfDay(new Date());
 
   const days = [];
   for (let index = 0; index < 7; index += 1) {
-    days.push(addDays(weekStart, index));
+    days.push(addDays(rangeStart, index));
   }
 
   const hours = [];
@@ -2111,11 +2122,12 @@ function renderTimetable(host) {
     .join("");
 
   const head = days
-    .map((day, index) => {
+    .map((day) => {
       const isToday = isSameDay(day, today);
+      const weekday = WEEKDAYS[(day.getDay() + 6) % 7];
       return `
         <div class="tt-head-day ${isToday ? "tt-today" : ""}">
-          <div>${WEEKDAYS[index]}</div>
+          <div>${weekday}</div>
           <div class="tt-head-date">${day.getMonth() + 1}/${day.getDate()}</div>
         </div>
       `;
@@ -2795,6 +2807,39 @@ function goToday() {
     syncPlanningWeekRange();
     renderPlanningOverview();
   }
+  renderTimetables();
+}
+
+function setCalendarRangeMode(mode) {
+  state.calendarRangeMode = mode === "week" ? "week" : "upcoming";
+  state.calendarStart = state.calendarRangeMode === "week"
+    ? startOfWeek(new Date())
+    : startOfDay(new Date());
+  $("calendarModeUpcoming")?.classList.toggle("active", state.calendarRangeMode === "upcoming");
+  $("calendarModeWeek")?.classList.toggle("active", state.calendarRangeMode === "week");
+  renderTimetables();
+}
+
+function previousCalendarRange() {
+  const fallback = state.calendarRangeMode === "week"
+    ? startOfWeek(new Date())
+    : startOfDay(new Date());
+  state.calendarStart = addDays(state.calendarStart || fallback, -7);
+  renderTimetables();
+}
+
+function nextCalendarRange() {
+  const fallback = state.calendarRangeMode === "week"
+    ? startOfWeek(new Date())
+    : startOfDay(new Date());
+  state.calendarStart = addDays(state.calendarStart || fallback, 7);
+  renderTimetables();
+}
+
+function goCalendarToday() {
+  state.calendarStart = state.calendarRangeMode === "week"
+    ? startOfWeek(new Date())
+    : startOfDay(new Date());
   renderTimetables();
 }
 
@@ -3830,6 +3875,7 @@ function handleError(error) {
 
 function init() {
   state.weekStart = startOfWeek(new Date());
+  state.calendarStart = startOfDay(new Date());
   updateFutureInputMinimums();
   setPlanningScope("week");
   if ($("itineraryDate")) {

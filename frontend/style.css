@@ -3630,6 +3630,10 @@ textarea:focus-visible,
     box-shadow: 0 2px 7px rgba(24, 32, 30, 0.09);
 }
 
+.calendar-range-control {
+    grid-template-columns: repeat(2, minmax(72px, 1fr));
+}
+
 .planning-overview {
     display: grid;
     min-width: min(100%, 560px);

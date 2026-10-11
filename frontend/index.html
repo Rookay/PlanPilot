@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>日程规划助手</title>
-    <link rel="stylesheet" href="style.css?v=20261011-base">
+    <link rel="stylesheet" href="style.css?v=20261011-calendar">
 </head>
 
 <body>
@@ -234,15 +234,19 @@
             <div class="page-header">
                 <div>
                     <h2>日历</h2>
-                    <p>按小时查看这一周的安排</p>
+                    <p>按小时查看接下来的安排</p>
                 </div>
 
                 <div class="calendar-nav">
                     <button class="primary-button" onclick="openEventModal()">+ 固定日程</button>
-                    <button class="ghost-button" onclick="previousWeek()">‹ 上一周</button>
+                    <div class="segmented-control calendar-range-control" role="group" aria-label="日历范围">
+                        <button id="calendarModeUpcoming" class="active" type="button" onclick="setCalendarRangeMode('upcoming')">未来 7 天</button>
+                        <button id="calendarModeWeek" type="button" onclick="setCalendarRangeMode('week')">自然周</button>
+                    </div>
+                    <button class="ghost-button" onclick="previousCalendarRange()">‹ 前 7 天</button>
                     <span class="week-label"></span>
-                    <button class="ghost-button" onclick="goToday()">今天</button>
-                    <button class="ghost-button" onclick="nextWeek()">下一周 ›</button>
+                    <button class="ghost-button" onclick="goCalendarToday()">今天</button>
+                    <button class="ghost-button" onclick="nextCalendarRange()">后 7 天 ›</button>
                 </div>
             </div>
 
@@ -899,7 +903,7 @@
 <script>window.API_URL = "http://192.168.1.50:8000/api";</script>
 -->
 
-<script src="app.js?v=20261011-base"></script>
+<script src="app.js?v=20261011-calendar"></script>
 
 </body>
 </html>
