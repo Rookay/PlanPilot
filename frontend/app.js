@@ -1449,7 +1449,7 @@ function setPlanningScope(scope) {
   } else if (scope === "week") {
     syncPlanningWeekRange();
   }
-  for (const name of ["today", "upcoming", "week", "custom"]) {
+  for (const name of ["today", "upcoming", "week"]) {
     const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
     button?.classList.toggle("active", name === scope);
   }
@@ -1492,11 +1492,13 @@ function setPlanningMode(mode) {
 }
 
 function markPlanningScopeCustom() {
+  // 用户手动改了 planStart / planDays 输入框；范围不再是任何预设。
+  // planningRange() 在 scope 不是 today/upcoming/week 时回退到自定义的 start + days。
   if (state.planningScope !== "custom") {
     state.planningScope = "custom";
-    for (const name of ["today", "upcoming", "week", "custom"]) {
+    for (const name of ["today", "upcoming", "week"]) {
       const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
-      button?.classList.toggle("active", name === "custom");
+      button?.classList.toggle("active", false);
     }
   }
   closePlanAlternatives();
