@@ -1440,16 +1440,13 @@ function showMapFallback(message) {
 function setPlanningScope(scope) {
   state.planningScope = scope;
   const now = new Date();
-  if (scope === "today") {
-    $("planStart").value = toDateTimeLocalValue(now);
-    $("planDays").value = 1;
-  } else if (scope === "upcoming") {
+  if (scope === "upcoming") {
     $("planStart").value = toDateTimeLocalValue(startOfDay(now));
     $("planDays").value = 7;
   } else if (scope === "week") {
     syncPlanningWeekRange();
   }
-  for (const name of ["today", "upcoming", "week"]) {
+  for (const name of ["upcoming", "week"]) {
     const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
     button?.classList.toggle("active", name === scope);
   }
@@ -1493,10 +1490,10 @@ function setPlanningMode(mode) {
 
 function markPlanningScopeCustom() {
   // 用户手动改了 planStart / planDays 输入框；范围不再是任何预设。
-  // planningRange() 在 scope 不是 today/upcoming/week 时回退到自定义的 start + days。
+  // planningRange() 在 scope 不是 upcoming/week 时回退到自定义的 start + days。
   if (state.planningScope !== "custom") {
     state.planningScope = "custom";
-    for (const name of ["today", "upcoming", "week"]) {
+    for (const name of ["upcoming", "week"]) {
       const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
       button?.classList.toggle("active", false);
     }
@@ -1509,13 +1506,11 @@ function planningRange() {
   const rawStart = $("planStart")?.value;
   const start = rawStart ? new Date(rawStart) : new Date();
   const days = Math.max(1, Number($("planDays")?.value) || 1);
-  const end = state.planningScope === "today"
-    ? addDays(startOfDay(start), 1)
-    : state.planningScope === "upcoming"
-      ? addDays(startOfDay(new Date()), 7)
-      : state.planningScope === "week"
-        ? addDays(startOfWeek(start), 7)
-        : addDays(start, days);
+  const end = state.planningScope === "upcoming"
+    ? addDays(startOfDay(new Date()), 7)
+    : state.planningScope === "week"
+      ? addDays(startOfWeek(start), 7)
+      : addDays(start, days);
   return { start, end, days };
 }
 
@@ -2114,7 +2109,7 @@ function updateWeekLabels() {
 }
 
 function planningRangeStart() {
-  if (state.planningScope === "today" || state.planningScope === "upcoming") {
+  if (state.planningScope === "upcoming") {
     return startOfDay(new Date());
   }
   if (state.planningScope === "week") {
