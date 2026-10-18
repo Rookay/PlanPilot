@@ -346,13 +346,7 @@ class AgentLoopTests(TestCase):
         with patch(
             "app.tools.event_tools.get_map_service",
             side_effect=MapNotConfiguredError("not configured"),
-        ):
-            pending = agent.handle(self.db, "安排马鞍山第一天行程", "trip-session")
-
-        self.assertTrue(pending.confirmation.required)
-        self.assertEqual(len(pending.confirmation.preview["events"]), 3)
-        self.assertEqual(event_service.list_events(self.db), [])
-        with patch(
+        ), patch(
             "app.agent.agent.schedule_service.audit_applied_changes",
             return_value={
                 "valid": True,
@@ -361,6 +355,11 @@ class AgentLoopTests(TestCase):
                 "audited": True,
             },
         ):
+            pending = agent.handle(self.db, "安排马鞍山第一天行程", "trip-session")
+
+            self.assertTrue(pending.confirmation.required)
+            self.assertEqual(len(pending.confirmation.preview["events"]), 3)
+            self.assertEqual(event_service.list_events(self.db), [])
             completed = agent.handle(
                 self.db,
                 "",
