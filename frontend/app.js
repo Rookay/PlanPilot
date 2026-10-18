@@ -3608,6 +3608,19 @@ async function reconnectAgent() {
   }
 }
 
+function llmErrorLabel(kind) {
+  switch (kind) {
+    case "auth":
+      return "鉴权失败";
+    case "rate_limit":
+      return "限流中";
+    case "transient":
+      return "网络异常";
+    default:
+      return "";
+  }
+}
+
 function renderAgentTrace(data) {
   const trace = $("agentTrace");
   const content = $("agentTraceContent");

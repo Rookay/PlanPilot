@@ -63,6 +63,26 @@ class LLMStatus:
     fallback_until: float = 0.0
 
 
+@dataclass
+class LLMStatus:
+    """LLM Provider 的运行状态,由 AgentLoop 维护并通过 /api/agent/status 暴露。
+
+    - state 取值:
+        "ok"                 —— 真实 LLM 正常(或从未出过错)
+        "transient_fallback" —— 上次失败是 5xx / 网络 / 超时,按指数退避中
+        "rate_limited"       —— 上次失败是 429,按指数退避中
+        "auth_failed"        —— 上次失败是 401 / 403,永久禁用直到进程重启
+    - fallback_until 是 ``time.monotonic()`` 时刻;``float("inf")`` 表示永不复原。
+    """
+
+    state: str = STATE_OK
+    consecutive_failures: int = 0
+    last_error_type: Optional[str] = None  # auth / rate_limit / transient
+    last_error_message: Optional[str] = None
+    last_success_at: Optional[float] = None
+    fallback_until: float = 0.0
+
+
 class AgentLoop:
     MAX_ITERATIONS = 12
     MAX_TOOL_CALLS = 24
@@ -152,8 +172,8 @@ class AgentLoop:
                     {
                         "role": "system",
                         "content": (
-                            "真实模型暂时不可用，已切换到本地规则模式。"
-                            f"错误摘要：{exc}"
+                            "真实模型鉴权失败,已永久切换到本地规则模式。"
+                            f"错误摘要:{exc}"
                         ),
                     }
                 )

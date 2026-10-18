@@ -4,7 +4,6 @@
 """Agent 对话接口。"""
 
 import uuid
-import time
 from typing import List
 
 from fastapi import APIRouter, Depends
