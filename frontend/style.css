@@ -3634,6 +3634,18 @@ textarea:focus-visible,
     grid-template-columns: repeat(2, minmax(72px, 1fr));
 }
 
+.planning-range-control {
+    grid-template-columns: repeat(2, minmax(72px, 1fr));
+}
+
+.scope-label {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--muted);
+    align-self: center;
+    margin-right: 4px;
+}
+
 .planning-overview {
     display: grid;
     min-width: min(100%, 560px);

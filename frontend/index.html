@@ -375,11 +375,10 @@
             </div>
 
             <div class="planning-scope-bar">
-                <div class="segmented-control" role="group" aria-label="计划范围">
-                    <button id="planScopeUpcoming" type="button" title="从今天起铺 7 天"
-                            onclick="setPlanningScope('upcoming')">未来 7 天</button>
-                    <button id="planScopeWeek" class="active" type="button" title="本周一到周日"
-                            onclick="setPlanningScope('week')">本周</button>
+                <span class="scope-label">日历视图</span>
+                <div class="segmented-control planning-range-control" role="group" aria-label="日历视图">
+                    <button id="planScopeUpcoming" type="button" onclick="setPlanningScope('upcoming')">未来 7 天</button>
+                    <button id="planScopeWeek" class="active" type="button" onclick="setPlanningScope('week')">本周</button>
                 </div>
                 <div id="planningOverview" class="planning-overview"></div>
             </div>
