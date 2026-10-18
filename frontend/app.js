@@ -1453,6 +1453,7 @@ function setPlanningScope(scope) {
   closePlanComparison();
   closePlanAlternatives();
   renderPlanningOverview();
+  renderTimetables();
 }
 
 function syncPlanningWeekRange() {
@@ -2092,19 +2093,34 @@ function updateWeekLabels() {
   const calendarText =
     `${calendarStart.getFullYear()}年 ${formatDate(calendarStart)} - ` +
     `${formatDate(addDays(calendarStart, 6))}`;
+  const planningStart = planningRangeStart();
+  const planningText =
+    `${planningStart.getFullYear()}年 ${formatDate(planningStart)} - ` +
+    `${formatDate(addDays(planningStart, 6))}`;
 
   $("planning")?.querySelectorAll(".week-label").forEach((label) => {
-    label.textContent = weekText;
+    label.textContent = state.planningScope === "week" ? weekText : planningText;
   });
   $("calendar")?.querySelectorAll(".week-label").forEach((label) => {
     label.textContent = calendarText;
   });
 }
 
+function planningRangeStart() {
+  if (state.planningScope === "today") {
+    return startOfDay(new Date());
+  }
+  if (state.planningScope === "week") {
+    return state.weekStart || startOfWeek(new Date());
+  }
+  const raw = $("planStart")?.value;
+  return raw ? startOfDay(new Date(raw)) : startOfDay(new Date());
+}
+
 function renderTimetable(host) {
   const rangeStart = host.id === "calendarGrid"
     ? state.calendarStart || startOfDay(new Date())
-    : state.weekStart || startOfWeek(new Date());
+    : planningRangeStart();
   const today = startOfDay(new Date());
 
   const days = [];
