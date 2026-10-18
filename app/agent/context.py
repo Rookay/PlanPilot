@@ -4,7 +4,20 @@
 """Context Builder：构造发送给 LLM 的上下文。
 
 原则：不把整个数据库发给 LLM，只给一个紧凑快照，其余按需通过工具查询。
+
+降级策略：
+``build_world_summary`` 内部多次 DB 查询。任意一条抛异常时不能让 Agent Loop
+整条挂掉——这是收 system prompt 的关键路径。所以：
+
+- 每个数据段（偏好 / 地点 / 任务 / 事件 / 安排）各自单独 try/except，
+  失败时记 logger.warning 并在该段补一行 ``（暂不可用）``；
+- 整个函数再加一层兜底 try/except，最坏情况下返回只含 UTC 时间的最小快照，
+  并 logger.exception 记根因。
+LLM 拿到部分降级快照仍可继续处理只会读取不写入的请求；
+完全不可用时仍能在 system prompt 里看到当前时间，回复"数据库暂时不可用"。
 """
+
+import logging
 
 from sqlalchemy.orm import Session
 
@@ -14,6 +27,8 @@ from app.models.task import Task
 from app.services import preference_service
 from app.services import location_service
 from app.utils import local_now, utc_offset_hours, utcnow
+
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """你是 PlanPilot 的个人规划助手，帮助用户管理任务（Task）、固定事件（Event）和时间安排（Schedule）。
 
@@ -62,120 +77,178 @@ def build_system_prompt(timezone: str = "Asia/Shanghai") -> str:
 
 
 def build_world_summary(db: Session, timezone: str = "Asia/Shanghai", limit: int = 12) -> str:
-    """构建当前世界的紧凑快照。"""
+    """构建当前世界的紧凑快照。
 
-    now = utcnow()
-    local = local_now(timezone)
-    offset = utc_offset_hours(timezone)
+    单段数据加载失败降级显示 ``（暂不可用）``；函数级失败回退到仅含当前时间的
+    最小快照。所有异常通过 logger 写入，方便排查。
+    """
 
-    tasks = (
-        db.query(Task)
-        .filter(Task.status.in_(["pending", "in_progress"]))
-        .order_by(Task.created_at.desc())
-        .limit(limit)
-        .all()
-    )
-    events = (
-        db.query(Event)
-        .filter(Event.end_time >= now)
-        .order_by(Event.start_time)
-        .limit(limit)
-        .all()
-    )
-    schedules = (
-        db.query(Schedule)
-        .filter(
-            Schedule.end_time >= now,
-            Schedule.status.in_(["proposed", "accepted"]),
+    try:
+        now = utcnow()
+        try:
+            local = local_now(timezone)
+        except Exception:  # noqa: BLE001 —— 时区解析时理论上不该挂，但兜底
+            logger.exception("build_world_summary: local_now 失败，使用 UTC 占位")
+            local = now
+        try:
+            offset = utc_offset_hours(timezone)
+        except Exception:  # noqa: BLE001
+            logger.exception("build_world_summary: utc_offset_hours 失败，默认 +0")
+            offset = 0
+
+        lines = [
+            f"当前时间：UTC {now.isoformat()} | 本地({timezone}) {local.isoformat()}（UTC{offset:+d}）"
+        ]
+
+        # 规划偏好
+        try:
+            preferences = preference_service.get_preferences(db)
+            lines.append(
+                "规划偏好："
+                f"工作 {preferences.workday_start}-{preferences.workday_end}，"
+                f"午休 {preferences.lunch_start or '无'}-{preferences.lunch_end or '无'}，"
+                f"默认间隔 {preferences.default_gap_minutes} 分钟，"
+                f"策略 {preferences.planning_strategy}，"
+                f"默认地点 {preferences.default_location or '未设置'}"
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("build_world_summary: 加载规划偏好失败")
+            lines.append("规划偏好：（暂不可用）")
+
+        # 常用地点 + 后续的任务 / 事件可能用到 location_names
+        location_names: dict = {}
+        try:
+            locations = location_service.list_locations(db)
+            location_names = {location.id: location.label for location in locations}
+            lines.append("\n常用地点：")
+            if locations:
+                for location in locations:
+                    marker = "（默认出发点）" if location.is_default else ""
+                    detail = location.address or location.city or "无地址说明"
+                    lines.append(
+                        f"- {location.label}{marker} | {detail} | "
+                        f"{location.longitude:.6f},{location.latitude:.6f}"
+                    )
+            else:
+                lines.append("- （无）")
+        except Exception:  # noqa: BLE001
+            logger.exception("build_world_summary: 加载常用地点失败")
+            lines.append("\n常用地点：（暂不可用）")
+
+        # 待办任务
+        try:
+            tasks = (
+                db.query(Task)
+                .filter(Task.status.in_(["pending", "in_progress"]))
+                .order_by(Task.created_at.desc())
+                .limit(limit)
+                .all()
+            )
+            lines.append("\n待办任务：")
+            if tasks:
+                for task in tasks:
+                    deadline = task.deadline.isoformat() if task.deadline else "无"
+                    task_location = (
+                        location_names.get(task.location_id)
+                        or task.location
+                        or "无"
+                    )
+                    lines.append(
+                        f"- #{task.id} {task.title} | 时长 {task.estimated_duration} 分 | "
+                        f"优先级 {task.priority} | 截止 {deadline} | 地点 {task_location} | "
+                        f"拆分 {'是' if task.splittable else '否'} | 前置 {task.dependency_ids or '无'}"
+                    )
+            else:
+                lines.append("- （无）")
+        except Exception:  # noqa: BLE001
+            logger.exception("build_world_summary: 加载待办任务失败")
+            lines.append("\n待办任务：（暂不可用）")
+
+        # 近期固定日程
+        try:
+            events = (
+                db.query(Event)
+                .filter(Event.end_time >= now)
+                .order_by(Event.start_time)
+                .limit(limit)
+                .all()
+            )
+            lines.append("\n近期固定日程：")
+            if events:
+                mode_names = {
+                    "walking": "步行",
+                    "driving": "自驾",
+                    "taxi": "打车",
+                    "transit": "公交/地铁",
+                }
+                for event in events:
+                    event_location = (
+                        location_names.get(event.location_id)
+                        or event.location
+                        or "无"
+                    )
+                    origin_location = (
+                        location_names.get(event.origin_location_id)
+                        or event.origin_location
+                        or "继承上一地点"
+                    )
+                    event_type = (
+                        f"赶路({mode_names.get(event.travel_mode, '公交/地铁')})"
+                        if event.event_type == "travel"
+                        else "普通活动"
+                    )
+                    location_summary = (
+                        f"路线 {origin_location} -> {event_location}"
+                        if event.event_type == "travel"
+                        else f"地点 {event_location}"
+                    )
+                    lines.append(
+                        f"- #{event.id} {event.title} | {event.start_time} ~ {event.end_time} | "
+                        f"类型 {event_type} | {location_summary} | "
+                        f"行程组 {event.trip_id or '无'}({event.trip_title or '无'})"
+                    )
+            else:
+                lines.append("- （无）")
+        except Exception:  # noqa: BLE001
+            logger.exception("build_world_summary: 加载固定日程失败")
+            lines.append("\n近期固定日程：（暂不可用）")
+
+        # 近期任务安排
+        try:
+            schedules = (
+                db.query(Schedule)
+                .filter(
+                    Schedule.end_time >= now,
+                    Schedule.status.in_(["proposed", "accepted"]),
+                )
+                .order_by(Schedule.start_time)
+                .limit(limit)
+                .all()
+            )
+            lines.append("\n近期任务安排：")
+            if schedules:
+                for schedule in schedules:
+                    lines.append(
+                        f"- #{schedule.id} 任务#{schedule.task_id} | "
+                        f"{schedule.start_time} ~ {schedule.end_time} | {schedule.status} | "
+                        f"分段 {schedule.chunk_index} | {'已锁定' if schedule.is_locked else '未锁定'}"
+                    )
+            else:
+                lines.append("- （无）")
+        except Exception:  # noqa: BLE001
+            logger.exception("build_world_summary: 加载任务安排失败")
+            lines.append("\n近期任务安排：（暂不可用）")
+
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 —— 整个降级路径本身崩了的话
+        logger.exception("build_world_summary: 顶层兜底触发")
+        try:
+            now = utcnow()
+        except Exception:  # noqa: BLE001
+            now = None
+        if now is None:
+            return "当前时间快照暂不可用。"
+        return (
+            "当前时间：UTC " + now.isoformat()
+            + "\n\n（注：上下文构建遇到异常，已退化为最小快照）"
         )
-        .order_by(Schedule.start_time)
-        .limit(limit)
-        .all()
-    )
-
-    lines = [
-        f"当前时间：UTC {now.isoformat()} | 本地({timezone}) {local.isoformat()}（UTC{offset:+d}）"
-    ]
-
-    preferences = preference_service.get_preferences(db)
-    lines.append(
-        "规划偏好："
-        f"工作 {preferences.workday_start}-{preferences.workday_end}，"
-        f"午休 {preferences.lunch_start or '无'}-{preferences.lunch_end or '无'}，"
-        f"默认间隔 {preferences.default_gap_minutes} 分钟，"
-        f"策略 {preferences.planning_strategy}，"
-        f"默认地点 {preferences.default_location or '未设置'}"
-    )
-
-    locations = location_service.list_locations(db)
-    location_names = {location.id: location.label for location in locations}
-    lines.append("\n常用地点：")
-    if locations:
-        for location in locations:
-            marker = "（默认出发点）" if location.is_default else ""
-            detail = location.address or location.city or "无地址说明"
-            lines.append(
-                f"- {location.label}{marker} | {detail} | "
-                f"{location.longitude:.6f},{location.latitude:.6f}"
-            )
-    else:
-        lines.append("- （无）")
-
-    lines.append("\n待办任务：")
-    if tasks:
-        for task in tasks:
-            deadline = task.deadline.isoformat() if task.deadline else "无"
-            task_location = location_names.get(task.location_id) or task.location or "无"
-            lines.append(
-                f"- #{task.id} {task.title} | 时长 {task.estimated_duration} 分 | "
-                f"优先级 {task.priority} | 截止 {deadline} | 地点 {task_location} | "
-                f"拆分 {'是' if task.splittable else '否'} | 前置 {task.dependency_ids or '无'}"
-            )
-    else:
-        lines.append("- （无）")
-
-    lines.append("\n近期固定日程：")
-    if events:
-        for event in events:
-            event_location = location_names.get(event.location_id) or event.location or "无"
-            origin_location = (
-                location_names.get(event.origin_location_id)
-                or event.origin_location
-                or "继承上一地点"
-            )
-            mode_names = {
-                "walking": "步行",
-                "driving": "自驾",
-                "taxi": "打车",
-                "transit": "公交/地铁",
-            }
-            event_type = (
-                f"赶路({mode_names.get(event.travel_mode, '公交/地铁')})"
-                if event.event_type == "travel"
-                else "普通活动"
-            )
-            location_summary = (
-                f"路线 {origin_location} -> {event_location}"
-                if event.event_type == "travel"
-                else f"地点 {event_location}"
-            )
-            lines.append(
-                f"- #{event.id} {event.title} | {event.start_time} ~ {event.end_time} | "
-                f"类型 {event_type} | {location_summary} | "
-                f"行程组 {event.trip_id or '无'}({event.trip_title or '无'})"
-            )
-    else:
-        lines.append("- （无）")
-
-    lines.append("\n近期任务安排：")
-    if schedules:
-        for schedule in schedules:
-            lines.append(
-                f"- #{schedule.id} 任务#{schedule.task_id} | "
-                f"{schedule.start_time} ~ {schedule.end_time} | {schedule.status} | "
-                f"分段 {schedule.chunk_index} | {'已锁定' if schedule.is_locked else '未锁定'}"
-            )
-    else:
-        lines.append("- （无）")
-
-    return "\n".join(lines)
