@@ -60,6 +60,11 @@ class Agent:
         decision: str,
         session_id: str,
     ) -> AgentResult:
+        # ⚠️ 契约：以下 for 循环里通过 registry.execute 调用的工具
+        # **不得** 在自己内部 ``db.commit()`` 或新开 Session。理由见
+        # ``app/agent/transaction.py`` 顶部注释——只有当前请求 Session
+        # 内的改动能在 snapshot.restore() 时被完整回滚。一旦某个 tool
+        # 提前 commit，恢复出的状态与真实 DB 会出现不可调和的分叉。
         pending = self.confirmation_store.get(db, action_id, session_id)
         if pending is None:
             result = AgentResult(
