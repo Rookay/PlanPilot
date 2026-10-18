@@ -15,3 +15,6 @@ schedule.db
 # IDE
 .idea/
 .vscode/
+
+# 本地工作 memory（项目级），不入仓库
+.workbuddy/
