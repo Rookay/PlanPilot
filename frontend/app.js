@@ -1443,10 +1443,13 @@ function setPlanningScope(scope) {
   if (scope === "today") {
     $("planStart").value = toDateTimeLocalValue(now);
     $("planDays").value = 1;
+  } else if (scope === "upcoming") {
+    $("planStart").value = toDateTimeLocalValue(startOfDay(now));
+    $("planDays").value = 7;
   } else if (scope === "week") {
     syncPlanningWeekRange();
   }
-  for (const name of ["today", "week", "custom"]) {
+  for (const name of ["today", "upcoming", "week", "custom"]) {
     const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
     button?.classList.toggle("active", name === scope);
   }
@@ -1491,7 +1494,7 @@ function setPlanningMode(mode) {
 function markPlanningScopeCustom() {
   if (state.planningScope !== "custom") {
     state.planningScope = "custom";
-    for (const name of ["today", "week", "custom"]) {
+    for (const name of ["today", "upcoming", "week", "custom"]) {
       const button = $(`planScope${name[0].toUpperCase()}${name.slice(1)}`);
       button?.classList.toggle("active", name === "custom");
     }
@@ -1506,9 +1509,11 @@ function planningRange() {
   const days = Math.max(1, Number($("planDays")?.value) || 1);
   const end = state.planningScope === "today"
     ? addDays(startOfDay(start), 1)
-    : state.planningScope === "week"
-      ? addDays(startOfWeek(start), 7)
-      : addDays(start, days);
+    : state.planningScope === "upcoming"
+      ? addDays(startOfDay(new Date()), 7)
+      : state.planningScope === "week"
+        ? addDays(startOfWeek(start), 7)
+        : addDays(start, days);
   return { start, end, days };
 }
 
@@ -2107,7 +2112,7 @@ function updateWeekLabels() {
 }
 
 function planningRangeStart() {
-  if (state.planningScope === "today") {
+  if (state.planningScope === "today" || state.planningScope === "upcoming") {
     return startOfDay(new Date());
   }
   if (state.planningScope === "week") {
