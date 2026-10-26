@@ -916,7 +916,21 @@
 <script>window.API_URL = "http://192.168.1.50:8000/api";</script>
 -->
 
-<script src="app.js?v=20261011-calendar"></script>
+<!-- app.js 已按业务域拆到 js/ 下。这里必须保持顺序加载：
+     core 定义常量与 api()，其余模块在运行时互相调用（函数声明是全局的），
+     不依赖加载先后，但 core 在最前、main 在最后能保证启动逻辑最后执行。
+     页面里有大量内联 onclick/onchange 依赖全局函数，因此没有改用 ES module。 -->
+<script src="js/core.js?v=20261027-split"></script>
+<script src="js/tasks.js?v=20261027-split"></script>
+<script src="js/events.js?v=20261027-split"></script>
+<script src="js/itinerary.js?v=20261027-split"></script>
+<script src="js/planning.js?v=20261027-split"></script>
+<script src="js/calendar.js?v=20261027-split"></script>
+<script src="js/settings.js?v=20261027-split"></script>
+<script src="js/chat.js?v=20261027-split"></script>
+<script src="js/session.js?v=20261027-split"></script>
+<script src="js/evaluations.js?v=20261027-split"></script>
+<script src="js/main.js?v=20261027-split"></script>
 
 </body>
 </html>
