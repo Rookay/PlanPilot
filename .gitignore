@@ -9,8 +9,10 @@ venv/
 config.json
 .env
 
-# 本地数据库
+# 本地数据库（含 WAL / SHM 与手工备份）
 schedule.db
+schedule.db-*
+schedule.db.bak-*
 
 # IDE
 .idea/

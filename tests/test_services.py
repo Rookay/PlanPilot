@@ -511,7 +511,7 @@ class ServiceTests(TestCase):
             }
         )
         with patch(
-            "app.services.schedule_service.get_map_service",
+            "app.services.schedule.core.get_map_service",
             return_value=FakeMapService(),
         ):
             result = schedule_service.generate_schedules(self.db, payload)
@@ -556,7 +556,7 @@ class ServiceTests(TestCase):
                 )
 
         with patch(
-            "app.services.schedule_service.get_map_service",
+            "app.services.schedule.core.get_map_service",
             return_value=FakeMapService(),
         ):
             result = schedule_service.generate_schedules(
@@ -608,7 +608,7 @@ class ServiceTests(TestCase):
                 )
 
         with patch(
-            "app.services.schedule_service.get_map_service",
+            "app.services.schedule.audit.get_map_service",
             return_value=FakeMapService(),
         ):
             result = schedule_service.audit_current_plan(self.db)
@@ -961,7 +961,7 @@ class ServiceTests(TestCase):
                 )
 
         with patch(
-            "app.services.schedule_service.get_map_service",
+            "app.services.schedule.audit.get_map_service",
             return_value=FakeMapService(),
         ):
             global_audit = schedule_service.audit_current_plan(self.db)
