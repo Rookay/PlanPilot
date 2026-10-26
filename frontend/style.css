@@ -1484,6 +1484,9 @@ body {
 .main {
     max-width: 1280px;
     width: 100%;
+    /* flex item 默认 min-width:auto 等于内容最小宽，会把 1280px 上限顶穿，
+       于是整个页面多出一条横向滚动条、右侧按钮被推出视口。0 才能正常收缩。 */
+    min-width: 0;
 }
 
 .page-header {
