@@ -66,7 +66,17 @@ const state = {
   planAlternativesRequest: null,
 };
 
+// 前端只认 localStorage 里存的那一个 session_id，没有会话列表也没有切换入口。
+// 换 origin（localhost 和 127.0.0.1 算两个）、清缓存、换浏览器都会拿到新 id，
+// 看起来像"历史没了"——其实数据都在库里，只是没有入口找回去。
+// 带 ?session=xxx 可跳过 localStorage 直接定位到某个已知会话。
+const urlSession = (
+  new URLSearchParams(window.location.search).get("session") || ""
+).trim();
+const hasUrlSession = /^[A-Za-z0-9_-]{1,64}$/.test(urlSession);
+
 state.chatSessionId =
+  (hasUrlSession ? urlSession : "") ||
   localStorage.getItem("planpilot_session_id") ||
   (window.crypto && crypto.randomUUID
     ? crypto.randomUUID().replace(/-/g, "")
