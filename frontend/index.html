@@ -280,11 +280,12 @@
             <div class="session-bar">
                 <div class="session-bar-head">
                     <span class="session-bar-label">历史会话</span>
-                    <button class="ghost-button compact-button" onclick="startNewSession()">新会话</button>
+                    <span id="sessionCount" class="session-count"></span>
                 </div>
                 <div id="sessionList" class="session-list">
                     <!-- JavaScript 动态生成 -->
                 </div>
+                <button class="ghost-button compact-button session-new-button" onclick="startNewSession()">新会话</button>
             </div>
 
             <div id="chatMessages" class="chat-messages">

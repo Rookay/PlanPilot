@@ -175,6 +175,36 @@ function formatDateTime(value) {
   return `${date.getFullYear()}-${month}-${day} ${formatTime(date)}`;
 }
 
+// 会话条里只放得下一行小字，完整时间（2026-10-26 21:10）连年份都挤进去反而
+// 最难扫。近两天用"今天 / 昨天"，今年省掉年份，跨年才写全。
+function formatSessionTime(value) {
+  const date = parseDate(value);
+  if (!date) {
+    return "";
+  }
+  const now = new Date();
+  const sameDay = (a, b) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+
+  if (sameDay(date, now)) {
+    return `今天 ${formatTime(date)}`;
+  }
+
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (sameDay(date, yesterday)) {
+    return `昨天 ${formatTime(date)}`;
+  }
+
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  if (date.getFullYear() === now.getFullYear()) {
+    return `${month}-${day}`;
+  }
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
 function toDateTimeLocalValue(value) {
   const date = parseDate(value);
   if (!date) {
@@ -3865,6 +3895,12 @@ function renderSessionList() {
   }
   container.textContent = "";
 
+  const counter = $("sessionCount");
+  if (counter) {
+    // 空字符串让 :empty 生效，把徽章整个收起来，而不是留个"0"。
+    counter.textContent = state.sessions.length ? String(state.sessions.length) : "";
+  }
+
   if (!state.sessions.length) {
     const empty = document.createElement("span");
     empty.className = "session-empty";
@@ -3894,7 +3930,7 @@ function renderSessionList() {
 
     const meta = document.createElement("span");
     meta.className = "session-chip-meta";
-    meta.textContent = `${item.message_count} 条 · ${formatDateTime(item.last_message_at)}`;
+    meta.textContent = `${item.message_count} 条 · ${formatSessionTime(item.last_message_at)}`;
 
     const remove = document.createElement("span");
     remove.className = "session-chip-delete";
@@ -3909,6 +3945,22 @@ function renderSessionList() {
     chip.append(title, meta, remove);
     container.appendChild(chip);
   });
+
+  // 会话多了以后当前会话可能已被滚出可视区，切完看不到"我现在在哪"。
+  // 只动列表自己的 scrollLeft：scrollIntoView 会连带外层页面一起滚，
+  // 而这个函数每次发完消息都会跑，页面会莫名其妙地上下跳。
+  const active = container.querySelector(".session-chip.active");
+  if (active) {
+    // 用视口坐标算，不用 offsetLeft：offsetLeft 相对的是最近的定位祖先，
+    // 未必是列表本身，减出来的数会带上无关偏移。
+    const list = container.getBoundingClientRect();
+    const chip = active.getBoundingClientRect();
+    if (chip.left < list.left) {
+      container.scrollLeft -= list.left - chip.left + 4;
+    } else if (chip.right > list.right) {
+      container.scrollLeft += chip.right - list.right + 4;
+    }
+  }
 }
 
 async function switchSession(sessionId) {

@@ -1070,102 +1070,209 @@ body {
 /* 历史会话条：横向滚动，不做成抽屉——抽屉要改页面为左右布局，
    现有纵向结构会被牵动，而会话切换本身不需要那么重的交互。 */
 
+/* 整条横向排布：标签 | 可滚动的会话列表 | 新会话按钮。
+   早先是上下两段（标签独占一行），占掉约 60px 高度却只放一行字；
+   改成单行后与下方消息区的关系更像"工具条"而不是又一张卡片。 */
+
 .session-bar {
-    background: #fff;
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    padding: 12px 14px;
-    margin-bottom: 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    margin-bottom: 14px;
+    background: #eef3f9;
+    border: 1px solid var(--line);
+    border-radius: 12px;
 }
 
 .session-bar-head {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 10px;
+    gap: 7px;
+    flex: 0 0 auto;
+    padding-right: 12px;
+    border-right: 1px solid var(--line);
 }
 
 .session-bar-label {
-    font-size: 13px;
-    color: #666;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+/* 数字用徽章而不是跟在标签后面当纯文本：几十个会话时，
+   一眼能看出"这里到底存了多少个"，不必逐个去数。 */
+
+.session-count {
+    min-width: 20px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(15, 118, 110, 0.14);
+    color: var(--primary-strong);
+    font-size: 11px;
+    font-weight: 700;
+    text-align: center;
+}
+
+.session-count:empty {
+    display: none;
 }
 
 .session-list {
     display: flex;
     gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
     overflow-x: auto;
-    padding-bottom: 4px;
+    padding: 1px 1px 3px;
+    /* 默认滚动条在 Windows 上是灰色实心条，高度能吃掉半行字；
+       压到 4px 并配合下面的 thumb 颜色，才不会把工具条撑脏。 */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(102, 112, 133, 0.28) transparent;
+}
+
+.session-list::-webkit-scrollbar {
+    height: 4px;
+}
+
+.session-list::-webkit-scrollbar-thumb {
+    background: rgba(102, 112, 133, 0.28);
+    border-radius: 2px;
+}
+
+.session-list::-webkit-scrollbar-track {
+    background: transparent;
 }
 
 .session-empty {
-    font-size: 13px;
-    color: #999;
+    padding: 6px 2px;
+    font-size: 12px;
+    color: var(--muted);
 }
+
+/* 胶囊是白底 + 可见边框，工具条是浅灰底：三级层次（页面 → 工具条 → 胶囊）
+   才拉得开。早先胶囊用 #f8fafc、工具条白底，两者几乎同色，一排胶囊看起来
+   像糊在一起。 */
 
 .session-chip {
     position: relative;
     flex: 0 0 auto;
-    max-width: 220px;
-    padding: 8px 30px 8px 10px;
-    border: 1px solid #ddd;
-    border-radius: 6px;
-    background: #fafafa;
+    max-width: 210px;
+    padding: 4px 24px 4px 9px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--panel);
     cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .session-chip:hover {
-    background: #f2f2f2;
+    border-color: rgba(15, 118, 110, 0.4);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
 }
 
 .session-chip.active {
-    border-color: #222;
-    background: #fff;
+    background: rgba(15, 118, 110, 0.07);
+    border-color: rgba(15, 118, 110, 0.45);
 }
 
 .session-chip.active::before {
     content: "";
     position: absolute;
     left: 0;
-    top: 6px;
-    bottom: 6px;
+    top: 7px;
+    bottom: 7px;
     width: 3px;
-    border-radius: 2px;
-    background: #222;
+    border-radius: 0 2px 2px 0;
+    background: var(--primary);
 }
 
 .session-chip-title {
     display: block;
-    max-width: 170px;
-    font-size: 13px;
-    color: #222;
+    max-width: 150px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--ink);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
+.session-chip.active .session-chip-title {
+    color: var(--primary-strong);
+}
+
 .session-chip-meta {
     display: block;
-    margin-top: 3px;
+    margin-top: 1px;
     font-size: 11px;
-    color: #888;
+    line-height: 1.3;
+    color: #8b95a7;
     white-space: nowrap;
 }
 
+/* 删除默认藏起来：一排 × 会让工具条看起来像"满是错误关闭按钮"，
+   而且容易误点。悬停或选中当前会话时再露出。 */
+
 .session-chip-delete {
     position: absolute;
-    top: 5px;
-    right: 7px;
-    padding: 1px 3px;
-    font-size: 15px;
+    top: 50%;
+    right: 3px;
+    padding: 2px 4px;
+    font-size: 14px;
     line-height: 1;
-    color: #bbb;
-    border-radius: 4px;
+    color: var(--muted);
+    border-radius: 5px;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-50%);
+    transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.session-chip:hover .session-chip-delete,
+.session-chip:focus-within .session-chip-delete,
+.session-chip.active .session-chip-delete {
+    opacity: 1;
+    pointer-events: auto;
 }
 
 .session-chip-delete:hover {
-    background: #f7dede;
-    color: #c0392b;
+    background: rgba(220, 107, 74, 0.12);
+    color: var(--accent);
+}
+
+/* 排在列表之后、固定不滚动，切换会话时位置不变，不用去追它。
+   选择器带上 .session-bar 是为了压过后面视觉升级里的 .ghost-button
+   （同为单类时后者胜，那会把这里的主色和描边又改回中性灰）。 */
+
+.session-bar .session-new-button {
+    flex: 0 0 auto;
+    color: var(--primary-strong);
+    border-color: rgba(15, 118, 110, 0.32);
+    white-space: nowrap;
+}
+
+.session-bar .session-new-button:hover {
+    background: rgba(15, 118, 110, 0.08);
+}
+
+/* 窄屏三段挤在一行会把列表压到看不见，先让出标签的位置，只保留计数与列表。 */
+
+@media (max-width: 560px) {
+    .session-bar {
+        gap: 8px;
+        padding: 7px 10px;
+    }
+
+    .session-bar-label {
+        display: none;
+    }
+
+    .session-bar-head {
+        padding-right: 8px;
+    }
 }
 
 .chat-messages {
