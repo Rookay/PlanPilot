@@ -7,7 +7,7 @@ import time
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.agent.factory import agent, reconnect_agent
@@ -21,7 +21,12 @@ from app.schemas.agent import (
     ConfirmationInfoSchema,
 )
 from app.schemas.chat import ChatMessageResponse
-from app.services import agent_run_service, chat_service, summary_service
+from app.services import (
+    agent_run_service,
+    chat_request_service,
+    chat_service,
+    summary_service,
+)
 
 router = APIRouter(
     prefix="/api/agent",
@@ -91,12 +96,16 @@ def _purge_session(db: Session, session_id: str) -> dict:
     deleted = chat_service.clear_messages(db, session_id)
     deleted_runs = agent_run_service.clear_runs(db, session_id)
     deleted_summary = summary_service.clear_summary(db, session_id)
+    # 幂等记录也要清：留着会把一个已经不存在的会话"记"在库里，
+    # 而且同 id 重放会返回一个指向已删会话的响应。
+    deleted_requests = chat_request_service.clear_for_session(db, session_id)
     db.commit()
     # 没有进程内缓存要清理：历史每次请求都从表里读，删表即生效。
     return {
         "deleted": deleted,
         "deleted_runs": deleted_runs,
         "deleted_summary": deleted_summary,
+        "deleted_requests": deleted_requests,
     }
 
 
@@ -160,8 +169,52 @@ def agent_chat(
     payload: AgentChatRequest,
     db: Session = Depends(get_db),
 ):
-    session_id = payload.session_id or uuid.uuid4().hex
+    """对话入口。带 ``request_id`` 时按幂等处理，否则退化成"每次都执行"。
 
+    幂等这件事必须发生在**模型开始跑之前**：一次请求可能十几轮工具调用、几十
+    秒、真金白银。等跑完再靠"结果里有没有重复"去判断，钱已经花掉了。
+    """
+
+    session_id = payload.session_id or uuid.uuid4().hex
+    request_id = (payload.request_id or "").strip() or None
+
+    if request_id is None:
+        return _chat_once(db, payload, session_id)
+
+    reservation = chat_request_service.reserve(
+        db, request_id, session_id, payload.message
+    )
+    if reservation.state == "done":
+        # 重放：直接返回第一次的响应体，不再产生任何副作用，也不再扣费。
+        return reservation.response
+    if reservation.state == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="同一次请求正在处理中，请等待上一次返回（已按 request_id 去重）",
+        )
+
+    try:
+        response = _chat_once(db, payload, session_id)
+    except Exception as exc:  # noqa: BLE001
+        # 失败也要落状态，否则这个 request_id 会永远停在 running，
+        # 用户重发只能拿到 409（直到 STALE_RUNNING_SECONDS 之后才被接管）。
+        db.rollback()
+        chat_request_service.fail(db, request_id, f"{type(exc).__name__}: {exc}")
+        db.commit()
+        raise
+
+    chat_request_service.finish(
+        db, request_id, response.model_dump(mode="json")
+    )
+    db.commit()
+    return response
+
+
+def _chat_once(
+    db: Session,
+    payload: AgentChatRequest,
+    session_id: str,
+) -> AgentChatResponse:
     started = time.perf_counter()
     result = agent.handle(
         db=db,

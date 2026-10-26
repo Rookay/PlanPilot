@@ -40,6 +40,15 @@ class AgentChatRequest(BaseModel):
         default=None,
         description="用户对 confirmation 的决定。",
     )
+    request_id: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description=(
+            "幂等键，同一逻辑请求重发时必须携带同一个值。"
+            "留空则每次都当作新请求，不去重（兼容旧客户端）。"
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_message(self):

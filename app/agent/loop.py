@@ -5,6 +5,7 @@
 
 import json
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -93,6 +94,11 @@ class LLMStatus:
 class AgentLoop:
     MAX_ITERATIONS = 12
     MAX_TOOL_CALLS = 24
+    #: 单次请求的墙钟上限（秒）。``MAX_ITERATIONS × 单次 LLM 超时`` 只约束
+    #: "一轮"，不约束"一次请求"：最坏能跑 6 分钟，而前端只有一个 loading。
+    #: 这里给整次请求一个硬上限，超了就带着已完成的步骤提前收尾。
+    #: 注意单次 LLM 调用无法从外部打断，所以实际最坏耗时会多出最多一次调用。
+    RUN_DEADLINE_SECONDS = float(os.getenv("AGENT_RUN_DEADLINE_SECONDS", "90"))
     #: 历史条数上限，先按条数粗筛。
     HISTORY_MESSAGE_LIMIT = 10
     #: 单条历史消息的 token 上限，超出后按信息密度压缩。
@@ -207,10 +213,48 @@ class AgentLoop:
         saturated_tools: set[str] = set()
         model_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         provider = self.llm
+        started = time.monotonic()
 
         for _ in range(self.MAX_ITERATIONS):
             # 每轮先核预算：12 轮累积的工具结果可能远超单条上限。
             self._enforce_prompt_budget(messages)
+
+            elapsed = time.monotonic() - started
+            if elapsed >= self.RUN_DEADLINE_SECONDS:
+                # 不再调模型做总结：那正是要避免的额外等待，而且超时点通常已经
+                # 是"预算耗尽"的状态，再问一次只会得到又一段冗长的计划。
+                return AgentResult(
+                    reply=(
+                        f"这次请求已经跑了 {int(elapsed)} 秒，超过单次上限 "
+                        f"{int(self.RUN_DEADLINE_SECONDS)} 秒，我先停在这里。"
+                        f"已经完成 {tool_call_count} 次工具调用，结果都保留着；"
+                        "如果还差一步，继续告诉我就行。"
+                    ),
+                    session_id=session_id,
+                    tool_calls=tool_call_log,
+                    applied_changes=applied_changes,
+                    proposed_schedules=proposed_schedules,
+                    model_usage=model_usage,
+                    selected_skill=(
+                        selected_skill.name if selected_skill is not None else None
+                    ),
+                    skill_source=skill_source,
+                    workflow_steps=[
+                        {
+                            "kind": "deadline",
+                            "stage": "截断",
+                            "name": "run_deadline",
+                            "label": "达到单次请求时长上限",
+                            "status": "warning",
+                            "summary": (
+                                f"已执行 {tool_call_count} 次工具调用后主动中止，"
+                                "剩余步骤未执行。已完成的改动不会回滚。"
+                            ),
+                            "duration_ms": int(elapsed * 1000),
+                        }
+                    ],
+                )
+
             provider = self._pick_provider()
             used_real = provider is self.llm
             try:

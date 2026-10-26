@@ -17,6 +17,7 @@ from app.models.evaluation import EvaluationRun
 from app.models.pending_action import PendingAction
 from app.models.summary import SessionSummary
 from app.models.fact import MemoryFact
+from app.models.chat_request import ChatRequest
 
 __all__ = [
     "Task",
@@ -33,4 +34,5 @@ __all__ = [
     "PendingAction",
     "SessionSummary",
     "MemoryFact",
+    "ChatRequest",
 ]
