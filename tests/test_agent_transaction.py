@@ -1,84 +1,90 @@
 # -*- coding: UTF-8 -*-
 """``AgentDatabaseSnapshot`` 行为测试。
 
-这个文件守住的不只是当前实现，还守住一个隐性的架构契约——所有 Agent 工具
-在执行期间不得自 commit。测试通过 ``ToolCommitNotAllowedError`` 的存在性声明
-该约束；snapshot 自身的 capture/restore round-trip 行为也写在这里。
+这里守住两件事：
+
+1. **只撤销本次确认流的改动**。旧实现回滚时 ``DELETE`` 整表再灌回快照，
+   并发下会抹掉别的会话刚提交的行，且不报错。现在用写集白名单决定删什么。
+2. **service 层自己 commit 是常态**。``delete_event`` / ``delete_task`` 都在
+   service 里提交，所以撤销点必须是"补偿"而不是事务回滚——哪怕已经提交过，
+   也要能修回原状。
 """
 
+import os
+import tempfile
+from pathlib import Path
 from unittest import TestCase
 
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+
+from app import models  # noqa: F401  建表需要先导入所有模型
 from app.agent.transaction import (
     AgentDatabaseSnapshot,
     ToolCommitNotAllowedError,
-    _DELETE_ORDER,
     _MODELS,
     _RESTORE_ORDER,
 )
-from app.models.task import Task
+from app.database import Base, configure_sqlite_connection
+from app.models.event import Event
+from app.models.schedule import Schedule
+from app.models.task import Task, TaskDependency
 from tests.helpers import make_session
 
 
-class AgentSnapshotContractTests(TestCase):
-    """契约型 / 元型断言。仅靠 import + 属性检查，保护未来重构不会悄悄改名。"""
-
-    def test_documented_models_match_set(self):
-        """如果有人改 ``_MODELS`` 但忘记 ``_DELETE_ORDER`` / ``_RESTORE_ORDER``，
-        顺序不当会让 restore 在 FK 报错。强制要求两张表的覆盖顺序一致。
-        """
-        self.assertEqual(set(_MODELS), set(_DELETE_ORDER))
-        self.assertEqual(set(_MODELS), set(_RESTORE_ORDER))
-
-    def test_restore_order_matches_models(self):
-        """``_RESTORE_ORDER`` 必须与 ``_MODELS`` 相同——
-        重建顺序就是原 capture 顺序：先恢复父表、子表排在最后；否则 FK 会冲突。
-        """
-        self.assertEqual(_RESTORE_ORDER, _MODELS)
-
-    def test_delete_order_puts_fk_children_before_parents(self):
-        """``_DELETE_ORDER`` 的核心不变量：所有有 FK 指向其他表的（``_MODELS`` 中
-        排在末尾的 Schedule / TaskDependency 等）必须排在删除序列前面。后两个
-        独立表（``UserPreference`` / ``PlanVersion``）可以放在任何位置，但保持
-        当前排序。
-        """
-        # 找出 MODELS 中"被引用"的部分（不带独立表）
-        # 简单粗暴按位置：前 4 个是被引用方（Task/Event/TaskDependency/Schedule），
-        # 后 2 个是独立表。验证：
-        referenced = _MODELS[:4]
-        independent = _MODELS[4:]
-
-        # DELETE_ORDER 中 independent 必须排在 referenced 之后
-        delete_index_of_independent = [_DELETE_ORDER.index(m) for m in independent]
-        delete_index_of_referenced = [_DELETE_ORDER.index(m) for m in referenced]
-        self.assertGreater(
-            min(delete_index_of_independent),
-            max(delete_index_of_referenced),
-            "独立表应排在被引用表之后删除（FK 不阻塞）",
-        )
-        # 被引用表本身的删除索引必须严格递减（reverse of capture order）
-        for earlier, later in zip(
-            delete_index_of_referenced, delete_index_of_referenced[1:]
-        ):
-            self.assertGreater(
-                earlier,
-                later,
-                "被引用表的删除顺序必须是 capture 顺序的反向",
-            )
+class SnapshotContractTests(TestCase):
+    """契约型断言：靠静态扫描，不依赖运行时。"""
 
     def test_tool_commit_not_allowed_error_is_public(self):
-        """``ToolCommitNotAllowedError`` 必须保留为 RuntimeError 子类——它在
-        docstring / 注释里被引用，未来若有人删了类型，契约就丢了。
-        """
+        # 这个类型在 transaction.py 的注释里被引用，删掉契约就丢了。
         self.assertTrue(issubclass(ToolCommitNotAllowedError, RuntimeError))
 
+    def test_restore_order_puts_parents_before_children(self):
+        """外键要求父表先恢复，否则插入会被挡住。"""
 
-class AgentSnapshotRoundTripTests(TestCase):
-    """功能行为：capture → 修改 → restore 必须真的回到 capture 时刻。"""
+        self.assertEqual(_RESTORE_ORDER, _MODELS)
+        for dependency in (Schedule, TaskDependency):
+            self.assertLess(
+                _RESTORE_ORDER.index(Task),
+                _RESTORE_ORDER.index(dependency),
+                f"{dependency.__name__} 依赖 Task，必须排在后面",
+            )
+        self.assertLess(
+            _RESTORE_ORDER.index(Event),
+            _RESTORE_ORDER.index(TaskDependency),
+        )
+
+    def test_no_tool_opens_its_own_session(self):
+        """工具新开 Session 会让写集抓不到，失败时无法补偿。"""
+
+        tools_dir = Path(__file__).resolve().parent.parent / "app" / "tools"
+        offenders = []
+        for path in sorted(tools_dir.glob("*.py")):
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue
+                if "SessionLocal(" in stripped or "Session(" in stripped:
+                    offenders.append(f"{path.name}:{lineno}: {stripped}")
+        self.assertEqual(
+            offenders,
+            [],
+            "工具不得新开 Session：写集抓不到就无法回滚\n" + "\n".join(offenders),
+        )
+
+
+class SnapshotRoundTripTests(TestCase):
+    """capture → 修改 → restore 必须回到 capture 时刻。"""
 
     def setUp(self):
         self.db = make_session()
 
-    def _make_task(self, title, duration=60):
+    def tearDown(self):
+        self.db.close()
+
+    def _seed_task(self, title, duration=60):
+        """capture 之前就存在的历史数据。"""
+
         task = Task(
             title=title,
             estimated_duration=duration,
@@ -90,71 +96,202 @@ class AgentSnapshotRoundTripTests(TestCase):
         self.db.refresh(task)
         return task
 
-    def test_capture_and_restore_round_trip_unchanged(self):
-        """初始数据库 → 捕获 → 直接还原 → 行数与内容完全一致。"""
-        self._make_task("write")
+    def _add_task(self, title, commit=False):
+        task = Task(
+            title=title,
+            estimated_duration=30,
+            priority="low",
+            status="pending",
+        )
+        self.db.add(task)
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
+        return task
+
+    def test_round_trip_leaves_data_unchanged(self):
+        self._seed_task("write")
         snapshot = AgentDatabaseSnapshot.capture(self.db)
+
         snapshot.restore(self.db)
-        # restore 后不能再用原引用，必须重新查询
+
         tasks = self.db.query(Task).all()
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].title, "write")
 
-    def test_restore_rolls_back_partial_insert(self):
-        """snapshot 后插入新行 + 修改旧行 → restore 后只剩原内容。"""
-        self._make_task("first")
+    def test_restore_undoes_partial_inserts_and_updates(self):
+        self._seed_task("first")
         snapshot = AgentDatabaseSnapshot.capture(self.db)
 
-        # 中途新增
-        self._make_task("second")
-        # 中途修改 first 的 title
+        self._add_task("second")
         first = self.db.query(Task).filter(Task.title == "first").one()
         first.title = "first-modified"
-        self.db.commit()
+        self.db.flush()
 
-        # 此时数据库确实有 2 条
         self.assertEqual(self.db.query(Task).count(), 2)
 
         snapshot.restore(self.db)
 
-        # restore 后只剩 1 条，title 回到 "first"
         tasks = self.db.query(Task).all()
         self.assertEqual(len(tasks), 1, f"restore 后应只剩 1 行，实有 {len(tasks)}")
-        self.assertEqual(tasks[0].title, "first")
+        self.assertEqual(tasks[0].title, "first", "被改的字段也要退回去")
+
+    def test_restore_undoes_changes_already_committed_by_service(self):
+        """service 层自己 commit 是常态，撤销点必须仍然有效。
+
+        这条是整个补偿机制的存在理由：``delete_event`` 在 service 里就
+        ``db.commit()`` 了，事务回滚救不回来，只能靠写集补偿。
+        """
+
+        self._seed_task("baseline")
+        snapshot = AgentDatabaseSnapshot.capture(self.db)
+
+        self._add_task("already-committed", commit=True)
+
+        snapshot.restore(self.db)
+
+        titles = {task.title for task in self.db.query(Task).all()}
+        self.assertNotIn("already-committed", titles, "已提交的新增也要能撤销")
+        self.assertIn("baseline", titles)
+
+    def test_restore_brings_back_deleted_rows(self):
+        task = self._seed_task("will-be-deleted")
+        original_id = task.id
+        snapshot = AgentDatabaseSnapshot.capture(self.db)
+
+        self.db.delete(task)
+        self.db.commit()
+
+        snapshot.restore(self.db)
+
+        restored = self.db.query(Task).one()
+        self.assertEqual(restored.id, original_id)
+        self.assertEqual(restored.title, "will-be-deleted")
 
     def test_restore_keeps_original_ids(self):
-        """回滚后 id 应该与原始行一致，不应该重新分配。
-
-        在 restore 之前把 id 记下来，restore 之后重新查询校验。
-        """
-        original = self._make_task("id-stable")
+        original = self._seed_task("id-stable")
         original_id = original.id
+
         snapshot = AgentDatabaseSnapshot.capture(self.db)
+        self._add_task("bumps-the-sequence")
         snapshot.restore(self.db)
+
         task = self.db.query(Task).one()
         self.assertEqual(task.id, original_id)
 
-    def test_restore_preserves_all_columns(self):
-        """回滚后所有原列值都还在，不丢字段。"""
-        self._make_task("fields", duration=120)
+    def test_reference_after_restore_sees_rolled_back_value(self):
+        task = self._seed_task("before")
         snapshot = AgentDatabaseSnapshot.capture(self.db)
-        snapshot.restore(self.db)
-        task = self.db.query(Task).one()
-        self.assertEqual(task.title, "fields")
-        self.assertEqual(task.estimated_duration, 120)
-        self.assertEqual(task.priority, "medium")
-        self.assertEqual(task.status, "pending")
+        task.title = "after"
+        self.db.flush()
 
-    def test_holding_old_reference_raises_detached(self):
-        """显式验证 ``db.expire_all()`` 的副作用：restore 之前持有的 ORM 引用
-        再访问会触发 ``DetachedInstanceError``。这是有意为之的保护——上层不该
-        跨 restore 持有引用。
-        """
-        original = self._make_task("cross-ref")
-        snapshot = AgentDatabaseSnapshot.capture(self.db)
         snapshot.restore(self.db)
-        with self.assertRaises(Exception) as ctx:
-            # 这一步走 attribute refresh，触发 detached
-            _ = original.title
-        # SQLAlchemy 1.4/2.0 用 DetachedInstanceError；笼统地用 Exception 接
-        self.assertIn("DetachedInstanceError", type(ctx.exception).__name__)
+
+        self.assertEqual(task.title, "before")
+
+
+class SnapshotIsolationTests(TestCase):
+    """回滚不能碰别人的数据。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        path = os.path.join(self._tmpdir.name, "snapshot.db")
+        self.engine = create_engine(
+            f"sqlite:///{path}",
+            connect_args={"check_same_thread": False, "timeout": 15},
+            pool_size=5,
+            max_overflow=5,
+            future=True,
+        )
+
+        @event.listens_for(self.engine, "connect")
+        def _pragma(connection, _record):
+            configure_sqlite_connection(connection)
+
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine, autoflush=False, future=True)
+
+    def tearDown(self):
+        self.engine.dispose()
+        self._tmpdir.cleanup()
+
+    def test_restore_keeps_rows_committed_by_another_session(self):
+        """A 建立撤销点之后，B 提交了新数据；A 回滚时 B 的数据必须还在。
+
+        旧实现会在此时执行 ``DELETE FROM tasks`` 再灌回快照，B 那行随之消失。
+        """
+
+        session_a = self.Session()
+        session_b = self.Session()
+        try:
+            snapshot = AgentDatabaseSnapshot.capture(session_a)
+
+            # B 在 A 的撤销点之外独立提交
+            session_b.add(
+                Task(title="B 的任务", estimated_duration=30, priority="low", status="pending")
+            )
+            session_b.commit()
+
+            # A 也新增一条，随后失败
+            session_a.add(
+                Task(title="A 的任务", estimated_duration=30, priority="low", status="pending")
+            )
+            session_a.commit()
+
+            snapshot.restore(session_a)
+
+            titles = {task.title for task in session_a.query(Task).all()}
+            self.assertIn("B 的任务", titles, "别人的提交不能被回滚抹掉")
+            self.assertNotIn("A 的任务", titles, "自己的改动必须撤销")
+        finally:
+            session_a.close()
+            session_b.close()
+
+    def test_restore_does_not_delete_rows_added_after_capture_by_others(self):
+        """连"别的会话在我回滚之前立刻插入"这种情况也要保住。"""
+
+        session_a = self.Session()
+        session_b = self.Session()
+        try:
+            snapshot = AgentDatabaseSnapshot.capture(session_a)
+            for index in range(3):
+                session_b.add(
+                    Task(
+                        title=f"B 的并发任务 {index}",
+                        estimated_duration=30,
+                        priority="low",
+                        status="pending",
+                    )
+                )
+            session_b.commit()
+
+            snapshot.restore(session_a)
+
+            titles = {task.title for task in session_a.query(Task).all()}
+            self.assertEqual(
+                titles,
+                {f"B 的并发任务 {i}" for i in range(3)},
+                "A 什么都没写，回滚不该动任何东西",
+            )
+        finally:
+            session_a.close()
+            session_b.close()
+
+    def test_release_keeps_own_changes(self):
+        """成功路径：只撤监听，改动保留。"""
+
+        session = self.Session()
+        try:
+            snapshot = AgentDatabaseSnapshot.capture(session)
+            session.add(
+                Task(title="要保留", estimated_duration=30, priority="low", status="pending")
+            )
+            session.commit()
+
+            snapshot.release(session)
+
+            titles = {task.title for task in session.query(Task).all()}
+            self.assertIn("要保留", titles)
+        finally:
+            session.close()

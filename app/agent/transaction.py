@@ -1,32 +1,42 @@
 # -*- coding: UTF-8 -*-
 """Agent 批量确认的补偿式事务快照。
 
-工作原理：
-确认流（``Agent._handle_confirmation``）在批量执行用户确认的多个 tool 之前，
-调用 :meth:`AgentDatabaseSnapshot.capture` 把当前数据库里六张关键表的全部行
-原样抓到一个快照里；执行期间任意一步失败时调用 :meth:`restore`，回滚当前事务
-→ 全表删除 → 按依赖顺序重灌快照。
+为什么不是 SAVEPOINT：
+确认流里每一步都会调到 service 层，而 ``app/services/*`` 大量自己
+``db.commit()``（``delete_event``、``delete_task`` 等）。``commit()`` 会隐式
+释放所有 SAVEPOINT，撤销点在第一个工具跑完时就失效了。要改用 SAVEPOINT，
+得先把 20 多处 service 提交上移到请求层——那是另一个量级的改动。
 
-⚠️ 重要约束（所有 ``app/tools/*.py`` 的作者必读）：
-    执行期间被串行调用的所有 tool **不得自己** ``db.commit()``、**不得**新开
-    Session。所有改动必须留在当前请求的 Session 中，等待 restore 时整体回滚。
-    原因：本快照只能复原当前 Session 范围内的状态；如果某个 tool 提前 commit，
-    那么真实数据库已经动了，``rollback()`` 与重建都救不回来，restore 之后的状态
-    与真实 DB 出现分叉。
+所以这里做的是**补偿**：执行前记下六张关键表的内容，失败时把状态修回去。
+
+为什么不是"全表删除再灌回"：
+旧实现 ``DELETE`` 整张表再按快照重灌。写放大只是表象，真正的危害是并发下
+会删掉**别的会话刚提交的行**——请求 A 回滚时执行 ``DELETE FROM tasks``，
+请求 B 在同一时刻新建的任务就没了，且不报错、不可恢复。
+
+现在的关键区别：只删"本次确认流写进去的行"。写集用 SQLAlchemy 的
+``after_flush`` 事件累积。service 内部 commit 之前必然先 flush，所以哪怕它
+自己提交了，写集也能抓到。快照之外、写集之外的行一律不动。
+
+⚠️ 约束（``app/tools/*.py`` 与相关 service 的作者必读）：
+    不要在工具里新开 Session。同一个请求必须共用同一个 Session，否则写集
+    抓不到，回滚会漏。
+
+已知局限：
+    如果别的会话在本次确认流期间**修改了同一行**，restore 会把快照值写回去，
+    覆盖对方的修改。冲突粒度是行级、最后写入者生效——这与"同一份数据被两个人
+    同时编辑"的语义一致，不属于本类要解决的问题。
 
 可观察性：
-    ``restore`` 成功后立刻 ``db.expire_all()``，所有挂着的 ORM 对象都会被重新
-    加载；如果有调用方曾持有被删行的引用，再次访问会触发 ``DetachedInstanceError``，
-    这是有意为之：迫使上层重新查询、避免误用陈旧缓存。
-
-依赖顺序：
-    :data:`_DELETE_ORDER` 必须满足外键约束（先删子表 / 后删父表）；
-    :data:`_RESTORE_ORDER` 反过来，先恢复父表再恢复子表。当前两张表里的 ``trip_id``
-    仅是业务标记，无外键，但仍然按"创建在前、依赖在后"的直觉顺序重建。
+    ``restore`` 完成后 ``db.expire_all()``，所有挂着的 ORM 对象下次访问都会
+    重新查库；调用方不应跨 restore 持有引用。
 """
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, Set, Tuple
 
+from sqlalchemy import event as sa_event
 from sqlalchemy.orm import Session
 
 from app.models.event import Event
@@ -35,64 +45,135 @@ from app.models.preference import UserPreference
 from app.models.schedule import Schedule
 from app.models.task import Task, TaskDependency
 
+logger = logging.getLogger(__name__)
 
+
+#: 参与快照的表。按"创建在前、依赖在后"排列（恢复顺序）。
 _MODELS = (Task, Event, TaskDependency, Schedule, UserPreference, PlanVersion)
-_DELETE_ORDER = (Schedule, TaskDependency, Event, Task, UserPreference, PlanVersion)
-_RESTORE_ORDER = (Task, Event, TaskDependency, Schedule, UserPreference, PlanVersion)
+
+#: 恢复顺序：父表先于子表，否则外键会挡住插入。
+_RESTORE_ORDER = _MODELS
 
 
-# 用一个模块级异常类型标记 — 当前没启用，后续若想强制执行"tool 不能 commit"的
-# 约束，可以用 AST / monkey-patch / 中间件方式检测到 ``session.commit()`` 被调用
-# 时抛错，作为对工具作者纪律的硬保障。
 class ToolCommitNotAllowedError(RuntimeError):
-    """在确认流执行期间，工具不应直接 ``db.commit()``。
+    """标记"工具不应自行提交"这条约束。
 
-    现阶段只是文档化该约束，不强制抛错——强制需要更深入的 monkey-patch，
-    留给后续加固。
+    当前不主动抛出：service 层确实在提交，这是既有事实而非可以就地禁止的行为。
+    保留类型是为了让 ``app/tools`` 的作者在阅读时能看到这条约束存在。
     """
+
+
+def _primary_key(obj) -> Tuple:
+    """取主键元组。用元组而不是单值，兼容复合主键。"""
+
+    mapper = obj.__mapper__
+    return tuple(getattr(obj, column.key) for column in mapper.primary_key)
+
+
+def _row_dict(obj) -> Dict:
+    return {
+        column.name: getattr(obj, column.name) for column in obj.__table__.columns
+    }
 
 
 @dataclass
 class AgentDatabaseSnapshot:
-    """整个 Agent 批量确认流的"撤销点"。
+    """整个 Agent 批量确认流的撤销点。
 
-    实例方法：
-    - :meth:`capture` 在批量执行前调用一次，序列化 6 张表的当前内容。
-    - :meth:`restore` 在执行失败时调用，把数据库擦回快照时刻。
+    - ``rows``：执行前六张表的全部内容，按主键索引。
+    - ``inserted`` / ``deleted``：本次确认流写过的行（按模型分组的写集）。
+      这是"只撤销自己的改动"的依据。
     """
 
-    rows: dict[type, list[dict]]
+    rows: Dict[type, Dict[Tuple, Dict]] = field(default_factory=dict)
+    inserted: Dict[type, Set[Tuple]] = field(default_factory=dict)
+    deleted: Dict[type, Set[Tuple]] = field(default_factory=dict)
+    _listener: object = None
 
     @classmethod
     def capture(cls, db: Session) -> "AgentDatabaseSnapshot":
-        rows = {}
-        for model in _MODELS:
-            rows[model] = [
-                {column.name: getattr(item, column.name) for column in model.__table__.columns}
-                for item in db.query(model).all()
-            ]
-        return cls(rows=rows)
+        snapshot = cls(
+            rows={
+                model: {_primary_key(item): _row_dict(item) for item in db.query(model).all()}
+                for model in _MODELS
+            },
+            inserted={model: set() for model in _MODELS},
+            deleted={model: set() for model in _MODELS},
+        )
+
+        def _track(session, _flush_context, _instances=None) -> None:
+            # after_flush 里 session.new / session.deleted 还没被清空，
+            # 能拿到本次 flush 涉及的行的主键。service 内部 commit 之前必定
+            # 先 flush，所以这里抓得到它提交的内容。
+            for obj in session.new:
+                model = type(obj)
+                if model in snapshot.inserted:
+                    snapshot.inserted[model].add(_primary_key(obj))
+            for obj in session.deleted:
+                model = type(obj)
+                if model in snapshot.deleted:
+                    snapshot.deleted[model].add(_primary_key(obj))
+
+        snapshot._listener = _track
+        sa_event.listen(db, "after_flush", _track)
+        return snapshot
+
+    def _detach_listener(self, db: Session) -> None:
+        if self._listener is not None:
+            sa_event.remove(db, "after_flush", self._listener)
+            self._listener = None
 
     def restore(self, db: Session) -> None:
-        """回滚到快照时刻。
+        """把数据库修回快照时刻，且只动本次确认流碰过的行。
 
         步骤：
-        1. ``db.rollback()`` —— 丢弃当前 Session 未提交的改动。
-        2. 按 :data:`_DELETE_ORDER` 删除所有表（满足外键约束）。
-        3. ``db.flush()`` 让删除生效，使后续插入不会被唯一键冲突。
-        4. ``db.expunge_all()`` 切断 ORM 身份映射，避免重建时把已删对象误以为存在。
-        5. 按 :data:`_RESTORE_ORDER` 重建所有行。
-        6. ``db.commit()`` 落盘。
-        7. ``db.expire_all()`` 强制所有挂着的 ORM 实例下次访问时重新加载。
+        1. 撤掉监听；``db.rollback()`` 丢弃尚未提交的改动。
+        2. 删掉本次新增的行（写集里的 inserted）。
+        3. 按 :data:`_RESTORE_ORDER` 逐表把快照里的行恢复：还在就改回原值，
+           被删了就重新插入。
+        4. ``commit()`` 落盘，``expire_all()`` 让上层下次访问重新查库。
+
+        快照里没有、写集里也没有的行（别的会话新增的）不会被碰到。
         """
 
+        self._detach_listener(db)
         db.rollback()
-        for model in _DELETE_ORDER:
-            db.query(model).delete(synchronize_session=False)
-        db.flush()
-        db.expunge_all()
+
         for model in _RESTORE_ORDER:
-            db.add_all(model(**values) for values in self.rows.get(model, []))
-            db.flush()
+            self._restore_model(db, model)
+
         db.commit()
         db.expire_all()
+
+    def _restore_model(self, db: Session, model: type) -> None:
+        original = self.rows.get(model, {})
+        dirty_inserts = self.inserted.get(model, set())
+
+        current = {_primary_key(item): item for item in db.query(model).all()}
+
+        # 1. 本次新插入的：删掉。别的会话新增的行不在 dirty_inserts 里，不受影响。
+        for key in dirty_inserts:
+            obj = current.get(key)
+            if obj is not None:
+                db.delete(obj)
+        db.flush()
+
+        # 2. 快照里有的：存在则改回原值，不存在则补回去。
+        for key, values in original.items():
+            obj = current.get(key)
+            if obj is None:
+                db.add(model(**values))
+                continue
+            for name, value in values.items():
+                if getattr(obj, name) != value:
+                    setattr(obj, name, value)
+        db.flush()
+
+    def release(self, db: Session) -> None:
+        """成功路径：撤掉监听，改动保留在外层事务里。
+
+        service 层会自己提交，因此这里通常无事可做；保留方法是为了让
+        "这次确认已定稿、不再需要撤销点"在调用处显式可见。
+        """
+
+        self._detach_listener(db)

@@ -61,10 +61,9 @@ class Agent:
         session_id: str,
     ) -> AgentResult:
         # ⚠️ 契约：以下 for 循环里通过 registry.execute 调用的工具
-        # **不得** 在自己内部 ``db.commit()`` 或新开 Session。理由见
-        # ``app/agent/transaction.py`` 顶部注释——只有当前请求 Session
-        # 内的改动能在 snapshot.restore() 时被完整回滚。一旦某个 tool
-        # 提前 commit，恢复出的状态与真实 DB 会出现不可调和的分叉。
+        # **不得** 新开 Session——所有改动必须走同一个 Session，否则
+        # ``AgentDatabaseSnapshot`` 的写集抓不到，失败时无法补偿。
+        # service 层自己 commit 是允许的（见 transaction.py 顶部说明）。
         pending = self.confirmation_store.get(db, action_id, session_id)
         if pending is None:
             return AgentResult(
@@ -119,14 +118,16 @@ class Agent:
                 errors.append(result.error or f"{call['name']} 执行失败")
                 break
 
-        self.confirmation_store.remove(db, action_id)
-
         if errors:
+            # 先回滚再清待确认：restore 会按写集撤销本次改动，失败时保留
+            # pending 记录，用户可以重新发起确认再试一次。
             snapshot.restore(db)
             applied = []
             proposed = []
             reply = "操作未能完成，已恢复修改前状态：" + "；".join(errors)
         else:
+            snapshot.release(db)
+            self.confirmation_store.remove(db, action_id)
             reply = "已执行：" + "；".join(summaries) if summaries else "操作完成。"
 
         result = AgentResult(
