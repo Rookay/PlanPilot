@@ -9,11 +9,13 @@ from datetime import datetime
 from unittest import TestCase
 from unittest.mock import patch
 
+from app.agent.agent import Agent
 from app.agent.confirmation import PendingActionStore
 from app.agent.loop import AgentLoop
 from app.agent.memory import Memory
 from app.llm.mock import MockProvider
-from app.services import chat_service
+from app.schemas.task import TaskCreate
+from app.services import chat_service, task_service
 from app.skills.planner_skills import build_default_skills
 from app.tools.defaults import build_default_registry
 from tests.helpers import make_session
@@ -268,3 +270,106 @@ class TrajectoryRouteTests(TestCase):
         # 用 OpenAPI 而不是遍历 app.routes：后者里有 _IncludedRouter 这类中间对象。
         paths = set(app.openapi()["paths"])
         self.assertIn("/api/agent/sessions/{session_id}/tool-calls", paths)
+
+
+class ConfirmationTrajectoryTests(TestCase):
+    """confirm 级工具的两截轨迹。
+
+    真实 20 轮联调暴露过：``replan`` 经确认后明明执行成功（生成 6 条日程），
+    轨迹里却记成 ``success=False`` + "调用被中断"，而确认后真正执行的那一步
+    一条记录都没有。回看时会把成功操作误读成故障，最关键的执行环节恰好空白。
+    """
+
+    def setUp(self):
+        patcher = patch(
+            "app.services.time_policy.utcnow",
+            return_value=datetime(2026, 9, 15),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.db = make_session()
+        self.addCleanup(self.db.close)
+        self.store = PendingActionStore()
+        self.agent = Agent(
+            llm=MockProvider(),
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=self.store,
+            skill_registry=build_default_skills(),
+        )
+
+    def test_awaiting_call_is_not_marked_interrupted(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_call("c1", "replan")],
+            }
+        ]
+
+        records = AgentLoop._extract_trajectory(messages, awaiting_ids={"c1"})
+
+        self.assertEqual(len(records), 1)
+        self.assertFalse(records[0]["success"])
+        # 挂起不是故障：error 必须为空，否则回看时会被当成中断。
+        self.assertIsNone(records[0]["error"])
+        self.assertEqual(records[0]["summary"], "等待用户确认，尚未执行")
+
+    def test_interrupted_call_still_marked_when_not_awaiting(self):
+        # 反过来也要守：真被中断（不在 awaiting 集合里）仍要写明中断。
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_call("c1", "replan")],
+            }
+        ]
+
+        records = AgentLoop._extract_trajectory(messages)
+
+        self.assertEqual(records[0]["error"], "本轮未返回结果（调用被中断）")
+        self.assertIsNone(records[0]["summary"])
+
+    def test_confirmed_execution_leaves_trajectory(self):
+        task = task_service.create_task(
+            self.db,
+            TaskCreate(title="临时任务", estimated_duration=30),
+        )
+        self.db.commit()
+        action_id = self.store.create(
+            db=self.db,
+            tool_calls=[{"name": "delete_task", "args": {"task_id": task.id}}],
+            summary="删除任务「临时任务」",
+            preview={},
+            session_id="s1",
+        )
+
+        result = self.agent.handle(
+            self.db, "", "s1", confirm_action_id=action_id, decision="accept"
+        )
+
+        self.assertTrue(result.trajectory)
+        record = result.trajectory[0]
+        self.assertEqual(record["name"], "delete_task")
+        self.assertTrue(record["success"])
+        self.assertIsNone(record["error"])
+        # 确认路径没有模型给的 call_id，用合成 id 保持可反查。
+        self.assertEqual(record["tool_call_id"], f"confirm-{action_id}-0")
+        self.assertGreater(record["result_chars"], 0)
+
+    def test_rejected_confirmation_leaves_no_trajectory(self):
+        # 用户取消时什么都没执行，不该凭空留下执行记录。
+        action_id = self.store.create(
+            db=self.db,
+            tool_calls=[{"name": "delete_task", "args": {"task_id": 999}}],
+            summary="删除任务",
+            preview={},
+            session_id="s1",
+        )
+
+        result = self.agent.handle(
+            self.db, "", "s1", confirm_action_id=action_id, decision="reject"
+        )
+
+        self.assertEqual(result.trajectory, [])
+        self.assertIn("已取消", result.reply)

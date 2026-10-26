@@ -82,7 +82,8 @@ class Agent:
         summaries: list = []
         errors: list = []
         tool_calls: list = []
-        for call in pending.tool_calls:
+        trajectory: list = []
+        for index, call in enumerate(pending.tool_calls):
             started = time.perf_counter()
             result = self.registry.execute(call["name"], call["args"], db)
             duration_ms = int((time.perf_counter() - started) * 1000)
@@ -95,6 +96,9 @@ class Agent:
                     "summary": result.summary or result.error,
                     "duration_ms": duration_ms,
                 }
+            )
+            trajectory.append(
+                self._confirmation_trajectory_item(index, action_id, call, result)
             )
             if result.success:
                 summaries.append(result.summary or call["name"])
@@ -131,8 +135,46 @@ class Agent:
             applied_changes=applied,
             proposed_schedules=proposed,
             tool_calls=tool_calls,
+            trajectory=trajectory,
         )
         return result
+
+    def _confirmation_trajectory_item(
+        self,
+        index: int,
+        action_id: str,
+        call: dict,
+        result,
+    ) -> dict:
+        """为"确认后真正执行"的那次调用造一条轨迹记录。
+
+        确认路径不经过 ``AgentLoop.run``，拿不到模型给的 ``tool_call_id``。
+        这里用 ``confirm-{action_id}-{index}`` 合成：同一次确认内唯一，且能反查
+        到是哪个待确认操作落地的。
+
+        没有这段，轨迹里会只剩"等待确认"那条、真正的执行一片空白——正是用户
+        最想知道"到底改了什么"的那一步。
+        """
+
+        raw = self.loop._as_text(
+            result.data
+            if result.data is not None
+            else (result.summary or result.error or "")
+        )
+        limit = AgentLoop.TRAJECTORY_RESULT_CHARS
+        return {
+            "turn_index": index,
+            "tool_call_id": f"confirm-{action_id}-{index}",
+            "name": call["name"],
+            "arguments": self.loop._as_text(call["args"]),
+            "success": bool(result.success),
+            "summary": result.summary,
+            "error": None if result.success else (result.error or "执行失败"),
+            "result": (
+                raw if len(raw) <= limit else raw[:limit] + "…[轨迹落库时截断]"
+            ),
+            "result_chars": len(raw),
+        }
 
     def _finalize_result(self, db: Session, result: AgentResult) -> AgentResult:
         result.workflow_steps = [

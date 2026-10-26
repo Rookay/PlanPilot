@@ -161,7 +161,10 @@ class AgentLoop:
         # 循环结束再统一配对。容器是请求内的局部对象，不是进程状态，并发安全。
         holder: dict = {}
         result = self._run_loop(db, message, session_id, holder)
-        result.trajectory = self._extract_trajectory(holder.get("messages") or [])
+        result.trajectory = self._extract_trajectory(
+            holder.get("messages") or [],
+            awaiting_ids=holder.get("awaiting_ids") or set(),
+        )
         return result
 
     def _run_loop(
@@ -536,6 +539,9 @@ class AgentLoop:
                     pending_confirm_calls.append(
                         {"name": call.name, "args": call.arguments}
                     )
+                    # 记下 id：这轮结束后 messages 里不会有它的 observation，
+                    # 痕迹采集需要据此把它标成"等确认"而不是"被中断"。
+                    holder.setdefault("awaiting_ids", set()).add(call.id)
                     pending_summaries.append(
                         preview.summary or f"即将执行 {call.name}"
                     )
@@ -1022,14 +1028,23 @@ class AgentLoop:
     TRAJECTORY_RESULT_CHARS = 4000
 
     @classmethod
-    def _extract_trajectory(cls, messages: List[dict]) -> List[dict]:
+    def _extract_trajectory(
+        cls,
+        messages: List[dict],
+        awaiting_ids: Optional[set] = None,
+    ) -> List[dict]:
         """把局部 messages 里的 ``assistant.tool_calls`` 与 ``tool`` 消息配对。
 
         配对失败的调用也保留（``success=False`` + error 说明）。截断本身是排查
         线索——"模型调了但没拿到结果"和"模型根本没调"是两种完全不同的故障，
         悄悄丢掉前者会让人误判成因。
+
+        ``awaiting_ids`` 是"被 confirm 级别拦下、正在等用户确认"的调用 id。
+        这类调用同样没有 observation，但原因不是中断而是刻意挂起：把两者混成
+        同一条记录，回看时会把一次正常待确认误读成故障，也会掩盖真正的中断。
         """
 
+        awaiting = awaiting_ids or set()
         records: List[dict] = []
         pending: dict = {}
 
@@ -1043,14 +1058,17 @@ class AgentLoop:
                         continue
                     function = call.get("function") or {}
                     call_id = str(call.get("id") or "")
+                    is_awaiting = call_id in awaiting
                     record = {
                         "turn_index": len(records),
                         "tool_call_id": call_id,
                         "name": str(function.get("name") or ""),
                         "arguments": cls._as_text(function.get("arguments")),
                         "success": False,
-                        "summary": None,
-                        "error": "本轮未返回结果（调用被中断）",
+                        "summary": "等待用户确认，尚未执行" if is_awaiting else None,
+                        "error": None
+                        if is_awaiting
+                        else "本轮未返回结果（调用被中断）",
                         "result": None,
                         "result_chars": 0,
                     }
