@@ -1,7 +1,7 @@
 # PlanPilot 面试速记（一页版）
 
 > **打印这一页就够了。** 详细展开看 `interview-pitch.md`（27 题开口稿），120 题查 `interview-handbook.md`（整理版字典），更早的原始稿是 `interview-prep.md`。
-> 核对基线：`improvement @ d71153f`。本文所有数字与结论均已对代码 / 测试核实，可直接说。
+> 核对基线：`improvement` 分支 2026-10-26 快照（37 工具 / 10 Skill / 236 测试）。本文所有数字与结论均已对代码 / 测试核实，可直接说。
 
 ---
 
@@ -9,17 +9,17 @@
 
 | 控制项 | 值 | 出处 |
 |---|---|---|
-| 迭代上限 | `MAX_ITERATIONS = 12` | `loop.py:87` |
-| 普通工具总量 | `MAX_TOOL_CALLS = 24`（**轮末检查，非逐次硬上限**） | `loop.py:88` |
-| 历史条数 / 单条长度 | 最近 10 条 / 单条 1200 token，历史总预算 3600 token | `loop.py:93-100` |
-| prompt 总量 | 18000 token，超了按体积降级工具结果 | `loop.py:101` |
-| Memory 容量 | 100 条 | `memory.py:25` |
+| 迭代上限 | `MAX_ITERATIONS = 12` | `loop.py:89` |
+| 普通工具总量 | `MAX_TOOL_CALLS = 24`（**轮末检查，非逐次硬上限**） | `loop.py:90` |
+| 历史条数 / 单条长度 | 最近 10 条 / 单条 1200 token，历史总预算 3600 token | `loop.py:92-99` |
+| prompt 总量 | 18000 token，超了按体积降级工具结果 | `loop.py:99` |
+| 会话历史窗口 | 最近 10 条，每请求从 `chat_messages` 读（进程内无状态） | `chat_service.py` |
 | 待确认 TTL | 600 秒 | `confirmation` |
-| 退避 | 基础 60～600 秒，抖动 0～20%（实际最长 ~720） | `loop.py:107-109` |
+| 退避 | 基础 60～600 秒，抖动 0～20%（实际最长 ~720） | `loop.py:116-118` |
 | 模型单次超时 | 30 秒 | `config.py:54` |
 | CP-SAT | 每次 Solve 5 秒；外层最多 13 轮校验重求 | `optimizer` |
 | 缓存 TTL | 路线 5 分钟 / 地点搜索 24 小时 / 地理编码 30 天 | `maps/service.py:46,61,87` |
-| 规模 | 37 工具 / 10 Skill / 220 测试 / 5 个 Mock 评测场景 / 11 张表（快照 6 张） | — |
+| 规模 | 37 工具 / 10 Skill / 236 测试 / 5 个 Mock 评测场景 / 11 张表（快照 6 张） | — |
 
 **逐工具额度**：`get_weather / get_events / get_tasks / get_schedules` 各 3；`generate_plan / replan / replan_local` 各 2；`check_conflicts / evaluate_plan / compare_plan_alternatives / apply_plan_alternative` 各 1；`search_places / geocode_address` 各 8；`estimate_travel_time` 12。
 
@@ -40,7 +40,7 @@
 ```
 schema 白名单      ≠  执行权限（dispatch 未复核）
 调用去重          ≠  业务幂等（跨请求仍会重复写）
-Memory 方法锁     ≠  会话串行（同 session 并发会交错）
+读窗口无状态       ≠  会话串行（同 session 并发写仍会交错）
 pending 落库      ≠  并发只执行一次（无原子领取）
 补偿恢复          ≠  原生事务（无隔离、无崩溃原子性）
 执行后审计        ≠  自动回滚（当前只追加 warning）
@@ -88,7 +88,7 @@ FEASIBLE          ≠  已证明最优（不等于 OPTIMAL）
 模型看哪些上下文 → 为什么是 10 条 → 截断丢了约束怎么办 → 工具历史持久化吗 → 多 worker 一致吗 → 什么时候才需要语义记忆
 
 **D 评测**
-220 个测试测了什么 → Mock 能证明模型效果吗 → 真实评测怎么设计 → 路径不同算错吗 → 怎么测确认安全 → 怎么避免调 prompt 过拟合
+236 个测试测了什么 → Mock 能证明模型效果吗 → 真实评测怎么设计 → 路径不同算错吗 → 怎么测确认安全 → 怎么避免调 prompt 过拟合
 
 **E 规划**
 为什么用求解器 → 变量和目标是什么 → FEASIBLE 和 OPTIMAL 差在哪 → 地图约束怎么接进去 → 13 轮后还不合法怎么办 → 总时间预算怎么设

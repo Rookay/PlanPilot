@@ -196,7 +196,7 @@ mine/
 | Agent | `app/agent/agent.py` | 总编排：持有 Loop、Provider、Registry、Context、Memory、Confirmation |
 | Agent Loop | `app/agent/loop.py` | 决策循环、步数限制、工具调度、错误恢复、防循环 |
 | Context Builder | `app/agent/context.py` | 按请求动态构造最小上下文（分层） |
-| Memory | `app/agent/memory.py` | 短期会话 + 长期偏好 |
+| Memory | `app/agent/memory.py` | 长期偏好（短期历史见 `app/services/chat_service.py`） |
 | Confirmation | `app/agent/confirmation.py` | 待确认变更集的管理与提交 |
 | LLM Provider | `app/llm/base.py` 等 | 模型抽象、工具调用、结构化输出、解析 |
 | Tool | `app/tools/*` | 原子能力（CRUD、查询、规划） |
@@ -571,6 +571,12 @@ class ContextBuilder:
 
 - 当前会话的对话历史（`chat_messages` 需要增加 `session_id`）。
 - 当前规划任务的中间状态（proposed plan、待确认变更）。
+
+**当前实现（与最初设计的差异）**：短期历史不放进程内存。每次请求由
+`chat_service.recent_messages()` 从 `chat_messages` 读最近 10 条窗口，落库在
+API 层事务末尾统一完成；本轮 `assistant` 的 `tool_calls` 与工具结果只活在局部
+`messages` 里，不进入下一轮上下文。这样多 worker 与进程重启都不需要额外同步，
+代价是每请求一次带索引的查询。
 
 ### 9.2 长期用户偏好（Long-term User Preferences）
 
