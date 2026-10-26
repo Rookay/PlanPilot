@@ -12,6 +12,11 @@
 因此事实走候选制：第一次出现只记成 ``candidate``，同类事实再次出现把
 ``hit_count`` 加一，满两次才转 ``confirmed`` 并注入 system prompt。用户也可以
 直接确认或否决——``rejected`` 之后不会被自动提取重新拉回候选，否则否决就没意义。
+
+还有一个容易漏掉的状态 ``superseded``：同一件事的值被改了（"截止 10-30"
+改成 "截止 10-29"）。指纹是全文哈希，值一变就是新指纹，于是新旧两条并存，
+prompt 里同时给模型两个互相矛盾的截止日——它只能猜。所以写入新值时要把
+同主题的旧值标成 ``superseded``，让它退出注入但不删除（还看得出改过什么）。
 """
 from sqlalchemy import Column, DateTime, Integer, String, Text
 
@@ -22,6 +27,8 @@ from app.utils import utcnow
 STATUS_CANDIDATE = "candidate"
 STATUS_CONFIRMED = "confirmed"
 STATUS_REJECTED = "rejected"
+#: 同主题有了更新的值，这条已过时。保留以便追溯，但不注入 prompt。
+STATUS_SUPERSEDED = "superseded"
 
 #: 出现多少次转正。2 是"至少被独立提到过两次"的最小值；1 就等于相信一次推断。
 CONFIRM_HIT_THRESHOLD = 2
@@ -36,6 +43,12 @@ class MemoryFact(Base):
 
     #: 归一化文本的哈希。用它做去重键：同一句话换个标点不该算两条事实。
     fingerprint = Column(String(40), nullable=False, unique=True, index=True)
+
+    #: 主题键：这条事实说的是"哪件事"，不含具体值。
+    #: 例如 "季度总结截止 10-30" 的主题是 "季度总结截止日期"。同一主题出现
+    #: 新值时，旧值退出注入（见 ``STATUS_SUPERSEDED``）。模型没给时留空，
+    #: 由 fact_service 用"剥离数字后的骨架"兜底。
+    subject = Column(String(120), nullable=True, index=True)
 
     fact = Column(Text, nullable=False)
 

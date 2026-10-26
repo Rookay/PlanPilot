@@ -75,6 +75,7 @@ SUMMARY_SCHEMA = {
                 "properties": {
                     "fact": {"type": "string"},
                     "category": {"type": "string", "enum": list(CATEGORIES)},
+                    "subject": {"type": "string"},
                 },
                 "required": ["fact"],
                 "additionalProperties": False,
@@ -95,8 +96,11 @@ _INSTRUCTION = """你在维护一段对话的滚动摘要。输入是【已有�
 - entities：反复出现的关键实体（任务名、地点、人名、行程名）
 
 再加一个 facts 字段：从这段对话里能沉淀下来、以后还用得上的稳定信息，
-每条是 {"fact": "一句话", "category": "..."}，category 取
+每条是 {"fact": "一句话", "category": "...", "subject": "..."}，category 取
 constraint / decision / entity / preference / other 之一。
+subject 是这条事实在讲"哪件事"，**不含具体值**——比如 fact 是
+"季度总结截止 10-29"，subject 就写"季度总结截止日期"。同一 subject 出现
+新值时系统会用新值替换旧值，所以 subject 要稳定，不要带日期和数字。
 只写有明确依据的（称呼、身份关系、固定安排、长期习惯），最多 3 条；
 一次性的任务、临时的时间调整不要写。没有就给空数组。
 
@@ -411,10 +415,11 @@ def _normalize_facts(value) -> List[dict]:
     seen = set()
     for item in value[:_MAX_FACTS_PER_FOLD]:
         if isinstance(item, str):
-            text, category = item, "other"
+            text, category, subject = item, "other", None
         elif isinstance(item, dict):
             text = str(item.get("fact") or "")
             category = str(item.get("category") or "other").strip().lower()
+            subject = str(item.get("subject") or "").strip() or None
         else:
             continue
 
@@ -428,6 +433,10 @@ def _normalize_facts(value) -> List[dict]:
         if key in seen:
             continue
         seen.add(key)
-        facts.append({"fact": text, "category": category})
+        # subject 只能是"主题"而不是值本身：它用来判断两条事实说的是不是同一件事，
+        # 同一主题的新值要顶掉旧值。模型没给就留空，由后端用骨架兜底。
+        facts.append(
+            {"fact": text, "category": category, "subject": (subject or "")[:120] or None}
+        )
 
     return facts

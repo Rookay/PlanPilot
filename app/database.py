@@ -1,15 +1,18 @@
 # -*- coding: UTF-8 -*-
 # Project ：mine
 # File    ：database.py
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # 项目根目录（app/ 的上一级）。
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_database_url() -> str:
@@ -115,200 +118,216 @@ SessionLocal = sessionmaker(
 Base = declarative_base()
 
 
+#: 旧版本数据库需要补齐的列：``{表: {列名: 类型}}``。
+#: 新增字段时只在这里加一行，不用再写一段 PRAGMA + if + ALTER。
+#:
+#: 类型用一份声明兼容 SQLite 与其他方言：SQLite 的 ALTER TABLE ADD COLUMN
+#: 对类型很宽容，而 ``BOOLEAN NOT NULL DEFAULT 0`` 这类写法在 Postgres 上也成立。
+_COLUMN_ADDITIONS: dict = {
+    "tasks": {
+        "start_time": "DATETIME",
+        "location_id": "INTEGER",
+        "location": "VARCHAR(200)",
+        "location_city": "VARCHAR(100)",
+        "location_longitude": "FLOAT",
+        "location_latitude": "FLOAT",
+        "splittable": "BOOLEAN NOT NULL DEFAULT 0",
+        "min_chunk_minutes": "INTEGER NOT NULL DEFAULT 30",
+        "max_chunk_minutes": "INTEGER NOT NULL DEFAULT 120",
+    },
+    "events": {
+        "location_id": "INTEGER",
+        "event_type": "VARCHAR(20) NOT NULL DEFAULT 'activity'",
+        "travel_mode": "VARCHAR(20)",
+        "trip_id": "VARCHAR(32)",
+        "trip_title": "VARCHAR(200)",
+        "trip_order": "INTEGER",
+        "location_city": "VARCHAR(100)",
+        "location_longitude": "FLOAT",
+        "location_latitude": "FLOAT",
+        "origin_location": "VARCHAR(200)",
+        "origin_location_id": "INTEGER",
+        "origin_location_city": "VARCHAR(100)",
+        "origin_location_longitude": "FLOAT",
+        "origin_location_latitude": "FLOAT",
+    },
+    "schedules": {
+        "plan_batch_id": "VARCHAR(32)",
+        "reason": "TEXT",
+        "updated_at": "DATETIME",
+        "plan_version_id": "VARCHAR(32)",
+        "is_locked": "BOOLEAN NOT NULL DEFAULT 0",
+        "chunk_index": "INTEGER NOT NULL DEFAULT 1",
+        "source": "VARCHAR(20) NOT NULL DEFAULT 'auto'",
+    },
+    "chat_messages": {
+        "session_id": "VARCHAR(64) DEFAULT 'legacy'",
+        "agent_run_id": "VARCHAR(32)",
+    },
+    "memory_facts": {
+        # 主题键：判断两条事实说的是不是同一件事，见 app/services/fact_service.py。
+        "subject": "VARCHAR(120)",
+    },
+}
+
+#: 需要在补列之后确保存在的索引：``(索引名, 表, 列)``。
+_INDEXES: tuple = (
+    ("ix_tasks_location_id", "tasks", "location_id"),
+    ("ix_events_location_id", "events", "location_id"),
+    ("ix_events_origin_location_id", "events", "origin_location_id"),
+    ("ix_events_trip_id", "events", "trip_id"),
+    ("ix_schedules_plan_batch_id", "schedules", "plan_batch_id"),
+    ("ix_schedules_plan_version_id", "schedules", "plan_version_id"),
+    ("ix_chat_messages_session_id", "chat_messages", "session_id"),
+    ("ix_chat_messages_agent_run_id", "chat_messages", "agent_run_id"),
+    ("ix_memory_facts_subject", "memory_facts", "subject"),
+)
+
+
 def ensure_schema(target_engine) -> None:
-    """为旧版 SQLite 数据库补齐新增列。
+    """为旧版数据库补齐新增列与索引。
 
     ``Base.metadata.create_all`` 只会创建缺失的表，不会给已存在的表加列，
-    因此这里用 PRAGMA 检查并按需 ALTER TABLE。
+    因此这里做增量迁移。
+
+    实现上是"声明 + 统一执行"：补哪些列写在 ``_COLUMN_ADDITIONS`` 里，执行
+    只有一份逻辑。此前是 11 段手写 PRAGMA + if + ALTER 摊在 194 行里，每加
+    一个字段就要再抄一遍——漏掉一次，旧库启动就报 no such column。
+
+    列检查用 SQLAlchemy 的 inspector 而不是 ``PRAGMA table_info``，这样换
+    Postgres 时结构迁移仍然有效（原实现在非 SQLite 下直接 return，换库即失去
+    迁移能力）。只有依赖 SQLite 方言的数据回填才判断 ``IS_SQLITE``。
     """
 
-    if not IS_SQLITE:
+    with target_engine.begin() as connection:
+        inspector = inspect(connection)
+        existing_tables = set(inspector.get_table_names())
+        added: dict = {}
+
+        for table, additions in _COLUMN_ADDITIONS.items():
+            if table not in existing_tables:
+                # 表还不存在：create_all 会用当前模型建出来，不需要补列。
+                continue
+            columns = {column["name"] for column in inspector.get_columns(table)}
+            for name, sql_type in additions.items():
+                if name in columns:
+                    continue
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"
+                )
+                added.setdefault(table, set()).add(name)
+
+        for index_name, table, column in _INDEXES:
+            if table not in existing_tables:
+                continue
+            _create_index(connection, target_engine, index_name, table, column)
+
+        _backfill(connection, existing_tables, added)
+
+
+def _create_index(connection, target_engine, name: str, table: str, column: str) -> None:
+    """建索引。SQLite 支持 IF NOT EXISTS，其他方言靠异常兜住重复创建。"""
+
+    statement = f"CREATE INDEX {'IF NOT EXISTS ' if IS_SQLITE else ''}{name} ON {table} ({column})"
+    try:
+        connection.exec_driver_sql(statement)
+    except Exception:  # noqa: BLE001 —— 索引已存在不是错误
+        logger.debug("index %s already exists, skipped", name)
+
+
+def _backfill(connection, existing_tables: set, added: dict) -> None:
+    """给新补的列填初始值，并修一批历史数据。
+
+    只在需要时执行：没有新列、也不是旧库，就不做全表 UPDATE。
+
+    这里重新 ``inspect(connection)``：上面刚 ALTER 加过列，同一个 inspector
+    拿到的是缓存里的旧列集合，会漏判。
+    """
+
+    inspector = inspect(connection)
+
+    def columns_of(table: str) -> set:
+        if table not in existing_tables:
+            return set()
+        return {column["name"] for column in inspector.get_columns(table)}
+
+    event_columns = columns_of("events")
+    if event_columns:
+        _backfill_travel_mode(
+            connection,
+            event_columns,
+            migrate_legacy_trips="trip_id" in added.get("events", set()),
+        )
+
+    schedules_columns = columns_of("schedules")
+    if schedules_columns and "updated_at" in schedules_columns:
+        connection.exec_driver_sql(
+            "UPDATE schedules SET updated_at = created_at WHERE updated_at IS NULL"
+        )
+
+
+def _backfill_travel_mode(
+    connection, event_columns: set, *, migrate_legacy_trips: bool
+) -> None:
+    """旧数据的交通方式推断，以及把一天多段行程归成一个 trip 组。
+
+    只跑一次：``travel_mode`` 已是 'transit' 的行不会被再次覆盖；trip 归组只在
+    ``trip_id`` 这一列刚刚补上时执行。
+    """
+
+    walking_match = "title LIKE '%步行%'"
+    taxi_match = "title LIKE '%打车%'"
+    driving_match = "title LIKE '%驾车%'"
+    if "description" in event_columns:
+        walking_match += (
+            " OR (description LIKE '%步行%' AND description NOT LIKE '%公交%' "
+            "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%打车%' "
+            "AND description NOT LIKE '%驾车%')"
+        )
+        taxi_match += (
+            " OR (description LIKE '%打车%' AND description NOT LIKE '%公交%' "
+            "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%驾车%')"
+        )
+        driving_match += (
+            " OR (description LIKE '%驾车%' AND description NOT LIKE '%公交%' "
+            "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%打车%')"
+        )
+
+    for mode, match in (
+        ("walking", walking_match),
+        ("taxi", taxi_match),
+        ("driving", driving_match),
+    ):
+        connection.exec_driver_sql(
+            f"UPDATE events SET travel_mode = '{mode}' "
+            f"WHERE event_type = 'travel' AND travel_mode IS NULL AND ({match})"
+        )
+    connection.exec_driver_sql(
+        "UPDATE events SET travel_mode = 'transit' "
+        "WHERE event_type = 'travel' AND travel_mode IS NULL"
+    )
+
+    if not migrate_legacy_trips or "start_time" not in event_columns or not IS_SQLITE:
+        # trip 归组依赖 substr 与 ||，是 SQLite 语法；换库时这段历史数据
+        # 本身也不再存在，跳过即可。
         return
 
-    with target_engine.begin() as connection:
-        columns = {
-            row[1]
-            for row in connection.exec_driver_sql("PRAGMA table_info(tasks)")
-        }
-        if columns and "start_time" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE tasks ADD COLUMN start_time DATETIME"
-            )
-        if columns and "location_id" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE tasks ADD COLUMN location_id INTEGER"
-            )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_tasks_location_id ON tasks (location_id)"
-            )
-        task_location_additions = {
-            "location": "VARCHAR(200)",
-            "location_city": "VARCHAR(100)",
-            "location_longitude": "FLOAT",
-            "location_latitude": "FLOAT",
-            "splittable": "BOOLEAN NOT NULL DEFAULT 0",
-            "min_chunk_minutes": "INTEGER NOT NULL DEFAULT 30",
-            "max_chunk_minutes": "INTEGER NOT NULL DEFAULT 120",
-        }
-        for name, sql_type in task_location_additions.items():
-            if columns and name not in columns:
-                connection.exec_driver_sql(
-                    f"ALTER TABLE tasks ADD COLUMN {name} {sql_type}"
-                )
-
-        event_columns = {
-            row[1]
-            for row in connection.exec_driver_sql("PRAGMA table_info(events)")
-        }
-        if event_columns and "location_id" not in event_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE events ADD COLUMN location_id INTEGER"
-            )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_events_location_id ON events (location_id)"
-            )
-        if event_columns and "event_type" not in event_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE events ADD COLUMN event_type VARCHAR(20) "
-                "NOT NULL DEFAULT 'activity'"
-            )
-        if event_columns and "travel_mode" not in event_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE events ADD COLUMN travel_mode VARCHAR(20)"
-            )
-        migrate_legacy_trips = bool(event_columns and "trip_id" not in event_columns)
-        event_location_additions = {
-            "trip_id": "VARCHAR(32)",
-            "trip_title": "VARCHAR(200)",
-            "trip_order": "INTEGER",
-            "location_city": "VARCHAR(100)",
-            "location_longitude": "FLOAT",
-            "location_latitude": "FLOAT",
-            "origin_location": "VARCHAR(200)",
-            "origin_location_id": "INTEGER",
-            "origin_location_city": "VARCHAR(100)",
-            "origin_location_longitude": "FLOAT",
-            "origin_location_latitude": "FLOAT",
-        }
-        for name, sql_type in event_location_additions.items():
-            if event_columns and name not in event_columns:
-                connection.exec_driver_sql(
-                    f"ALTER TABLE events ADD COLUMN {name} {sql_type}"
-                )
-        if event_columns:
-            walking_match = "title LIKE '%步行%'"
-            taxi_match = "title LIKE '%打车%'"
-            driving_match = "title LIKE '%驾车%'"
-            if "description" in event_columns:
-                walking_match += (
-                    " OR (description LIKE '%步行%' AND description NOT LIKE '%公交%' "
-                    "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%打车%' "
-                    "AND description NOT LIKE '%驾车%')"
-                )
-                taxi_match += (
-                    " OR (description LIKE '%打车%' AND description NOT LIKE '%公交%' "
-                    "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%驾车%')"
-                )
-                driving_match += (
-                    " OR (description LIKE '%驾车%' AND description NOT LIKE '%公交%' "
-                    "AND description NOT LIKE '%地铁%' AND description NOT LIKE '%打车%')"
-                )
-            connection.exec_driver_sql(
-                "UPDATE events SET travel_mode = 'walking' "
-                "WHERE event_type = 'travel' AND travel_mode IS NULL "
-                f"AND ({walking_match})"
-            )
-            connection.exec_driver_sql(
-                "UPDATE events SET travel_mode = 'taxi' "
-                "WHERE event_type = 'travel' AND travel_mode IS NULL "
-                f"AND ({taxi_match})"
-            )
-            connection.exec_driver_sql(
-                "UPDATE events SET travel_mode = 'driving' "
-                "WHERE event_type = 'travel' AND travel_mode IS NULL "
-                f"AND ({driving_match})"
-            )
-            connection.exec_driver_sql(
-                "UPDATE events SET travel_mode = 'transit' "
-                "WHERE event_type = 'travel' AND travel_mode IS NULL"
-            )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_events_origin_location_id "
-                "ON events (origin_location_id)"
-            )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_events_trip_id ON events (trip_id)"
-            )
-            if migrate_legacy_trips and "start_time" in event_columns:
-                connection.exec_driver_sql(
-                    "UPDATE events SET "
-                    "trip_id = 'legacy-' || substr(start_time, 1, 10), "
-                    "trip_title = '历史行程' "
-                    "WHERE trip_id IS NULL AND substr(start_time, 1, 10) IN ("
-                    "SELECT substr(start_time, 1, 10) FROM events "
-                    "GROUP BY substr(start_time, 1, 10) HAVING COUNT(*) >= 3)"
-                )
-                connection.exec_driver_sql(
-                    "UPDATE events SET trip_order = ("
-                    "SELECT COUNT(*) FROM events earlier "
-                    "WHERE earlier.trip_id = events.trip_id "
-                    "AND (earlier.start_time < events.start_time "
-                    "OR (earlier.start_time = events.start_time AND earlier.id <= events.id))) "
-                    "WHERE trip_id IS NOT NULL AND trip_order IS NULL"
-                )
-
-        schedule_columns = {
-            row[1]
-            for row in connection.exec_driver_sql("PRAGMA table_info(schedules)")
-        }
-        schedule_additions = {
-            "plan_batch_id": "VARCHAR(32)",
-            "reason": "TEXT",
-            "updated_at": "DATETIME",
-            "plan_version_id": "VARCHAR(32)",
-            "is_locked": "BOOLEAN NOT NULL DEFAULT 0",
-            "chunk_index": "INTEGER NOT NULL DEFAULT 1",
-            "source": "VARCHAR(20) NOT NULL DEFAULT 'auto'",
-        }
-        for name, sql_type in schedule_additions.items():
-            if schedule_columns and name not in schedule_columns:
-                connection.exec_driver_sql(
-                    f"ALTER TABLE schedules ADD COLUMN {name} {sql_type}"
-                )
-        if schedule_columns:
-            connection.exec_driver_sql(
-                "UPDATE schedules SET updated_at = created_at WHERE updated_at IS NULL"
-            )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_schedules_plan_batch_id "
-                "ON schedules (plan_batch_id)"
-            )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_schedules_plan_version_id "
-                "ON schedules (plan_version_id)"
-            )
-
-        chat_columns = {
-            row[1]
-            for row in connection.exec_driver_sql("PRAGMA table_info(chat_messages)")
-        }
-        if chat_columns and "session_id" not in chat_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE chat_messages ADD COLUMN session_id VARCHAR(64) DEFAULT 'legacy'"
-            )
-        if chat_columns:
-            if "agent_run_id" not in chat_columns:
-                connection.exec_driver_sql(
-                    "ALTER TABLE chat_messages ADD COLUMN agent_run_id VARCHAR(32)"
-                )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_chat_messages_session_id "
-                "ON chat_messages (session_id)"
-            )
-            connection.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_chat_messages_agent_run_id "
-                "ON chat_messages (agent_run_id)"
-            )
+    connection.exec_driver_sql(
+        "UPDATE events SET "
+        "trip_id = 'legacy-' || substr(start_time, 1, 10), "
+        "trip_title = '历史行程' "
+        "WHERE trip_id IS NULL AND substr(start_time, 1, 10) IN ("
+        "SELECT substr(start_time, 1, 10) FROM events "
+        "GROUP BY substr(start_time, 1, 10) HAVING COUNT(*) >= 3)"
+    )
+    connection.exec_driver_sql(
+        "UPDATE events SET trip_order = ("
+        "SELECT COUNT(*) FROM events earlier "
+        "WHERE earlier.trip_id = events.trip_id "
+        "AND (earlier.start_time < events.start_time "
+        "OR (earlier.start_time = events.start_time AND earlier.id <= events.id))) "
+        "WHERE trip_id IS NOT NULL AND trip_order IS NULL"
+    )
 
 
 def check_database() -> bool:

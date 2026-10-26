@@ -12,6 +12,9 @@
    的降噪。
 3. **rejected 永不自动复活**：用户否决过的，再提也不拉回候选。否则"否决"只是
    一次性的，下次折叠又被提取回来，用户会觉得这个开关根本没用。
+4. **同主题的新值顶掉旧值**：指纹是全文哈希，值一变就是新指纹，于是"截止
+   10-30"和"截止 10-29"会并存注入 prompt。旧的那条标成 ``superseded``：
+   保留可追溯，但不再参与注入。这就是 ``subject`` 存在的理由。
 """
 
 import hashlib
@@ -26,6 +29,7 @@ from app.models.fact import (
     STATUS_CANDIDATE,
     STATUS_CONFIRMED,
     STATUS_REJECTED,
+    STATUS_SUPERSEDED,
     MemoryFact,
 )
 from app.utils import utcnow
@@ -33,7 +37,15 @@ from app.utils import utcnow
 #: 单条事实的长度上限。太长的一定是句子而不是"事实"，抽象成一句反而更准。
 MAX_FACT_CHARS = 200
 
+#: 兜底骨架的最短长度。"1 号楼"剥掉数字只剩两个字，拿它判同主题会连累无关事实。
+MIN_SKELETON_CHARS = 3
+
 _STRIP_RE = re.compile(r"[\s，。；、！？,.;!?：:（）()\[\]【】\"'“”‘’]")
+_NUMBER_RE = re.compile(r"\d+")
+#: "10-30"、"2026/10/30" 这类日期整体剥掉，留下"截止日期"这样的骨架。
+_DATE_RE = re.compile(
+    r"\d{2,4}\s*[-/年.]\s*\d{1,2}\s*([-/月.]\s*\d{1,2}\s*日?)?"
+)
 
 
 def fingerprint(fact: str) -> str:
@@ -41,6 +53,77 @@ def fingerprint(fact: str) -> str:
 
     normalized = _STRIP_RE.sub("", fact).lower()
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _skeleton(fact: str) -> str:
+    """剥掉日期、数字与标点后剩下的骨架，用来兜底判断同主题。"""
+
+    text = _DATE_RE.sub("", fact)
+    text = _STRIP_RE.sub("", text).lower()
+    return _NUMBER_RE.sub("", text)
+
+
+def subject_key(fact: str, subject: Optional[str] = None) -> str:
+    """主题键：优先用模型给的 subject，没有则退回骨架。
+
+    模型给的更准（能识别"导师姓王"→"导师姓李"是同一属性），骨架只在
+    模型漏填时兜底。
+    """
+
+    if subject:
+        normalized = _STRIP_RE.sub("", str(subject)).lower()
+        if len(normalized) >= 2:
+            return normalized
+    return _skeleton(fact)
+
+
+def _record_subject_key(record: MemoryFact) -> str:
+    return subject_key(record.fact, record.subject)
+
+
+def _same_subject(left: MemoryFact, right_key: str) -> bool:
+    """两条事实是否在说同一件事。
+
+    相等是第一优先；一方包含另一方也算（"季度总结截止" vs
+    "季度总结截止日期从改为"），但短的那方不能短于阈值。
+    """
+
+    a = _record_subject_key(left)
+    b = right_key
+    if not a or not b:
+        return False
+    if a == b:
+        return len(a) >= MIN_SKELETON_CHARS
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    return len(short) >= MIN_SKELETON_CHARS and short in long
+
+
+def _supersede_siblings(
+    db: Session, record: MemoryFact, key: str
+) -> List[MemoryFact]:
+    """把同主题的旧事实标成 superseded。
+
+    只动 candidate / confirmed：rejected 是用户的否决，不该被后来的提取顶掉；
+    已经是 superseded 的不用重复标记。
+    """
+
+    siblings = (
+        db.query(MemoryFact)
+        .filter(
+            MemoryFact.id != record.id,
+            MemoryFact.status.in_([STATUS_CANDIDATE, STATUS_CONFIRMED]),
+        )
+        .all()
+    )
+
+    superseded: List[MemoryFact] = []
+    for other in siblings:
+        if not _same_subject(other, key):
+            continue
+        other.status = STATUS_SUPERSEDED
+        other.updated_at = utcnow()
+        superseded.append(other)
+    return superseded
 
 
 def record_facts(
@@ -70,6 +153,9 @@ def record_facts(
         if category not in CATEGORIES:
             category = "other"
 
+        raw_subject = item.get("subject")
+        raw_subject = str(raw_subject).strip()[:120] if raw_subject else None
+
         key = fingerprint(text)
         if key in seen:
             continue
@@ -81,6 +167,7 @@ def record_facts(
         if record is None:
             record = MemoryFact(
                 fingerprint=key,
+                subject=raw_subject,
                 fact=text,
                 category=category,
                 status=STATUS_CANDIDATE,
@@ -93,6 +180,7 @@ def record_facts(
             db.flush()
             seen[key] = record
             touched.append(record)
+            _supersede_siblings(db, record, subject_key(text, raw_subject))
             continue
 
         if record.status == STATUS_REJECTED:
@@ -102,15 +190,36 @@ def record_facts(
             touched.append(record)
             continue
 
+        if record.status == STATUS_SUPERSEDED:
+            # 旧值又被提出来：说明用户改回去了，重新参与候选。
+            # hit_count 归 1，让它按正常门槛重新积累，而不是借旧值的历史。
+            record.status = STATUS_CANDIDATE
+            record.hit_count = 1
+            record.subject = record.subject or raw_subject
+            record.last_seen_at = utcnow()
+            seen[key] = record
+            touched.append(record)
+            _supersede_siblings(db, record, _record_subject_key(record))
+            continue
+
         record.hit_count += 1
         record.last_seen_at = utcnow()
+        # 模型这次给了主题就补上，之前漏填的也能被后续提取修正。
+        if raw_subject and not record.subject:
+            record.subject = raw_subject
         if (
             record.status == STATUS_CANDIDATE
             and record.hit_count >= CONFIRM_HIT_THRESHOLD
         ):
             record.status = STATUS_CONFIRMED
+        seen[key] = record
         touched.append(record)
+        _supersede_siblings(db, record, _record_subject_key(record))
 
+    # 生产的 Session 是 autoflush=False：不 flush 的话，本次刚改的 status 只存在
+    # 对象上，同一事务里接着查 confirmed_facts 会拿到改之前的结果——折叠完立刻
+    # 拼下一轮 prompt 正好走这条路径。
+    db.flush()
     return touched
 
 
