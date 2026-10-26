@@ -1,0 +1,9 @@
+# 实测通过的精确版本（Python 3.10.21 / 2026-10-26）。
+# 只锁直接依赖，不锁传递依赖：Windows 上 pip freeze 会带 pywin32 等平台包，
+# 全量冻结会让 Linux CI 装不上。
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+SQLAlchemy==2.0.52
+pydantic==2.13.5
+jsonschema==4.26.0
+ortools==9.15.6755

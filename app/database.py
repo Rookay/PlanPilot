@@ -82,9 +82,10 @@ def configure_sqlite_connection(dbapi_connection) -> None:
     这三条不是"调优"，是正确性：
 
     - ``foreign_keys``：SQLite 默认不校验外键，删任务会留下孤立日程。
-    - ``journal_mode=WAL``：默认的 rollback journal 下，一个写事务会挡住所有
-      读。本应用的写事务要跨多轮工具调用，锁窗口太长；WAL 让读写互不阻塞，
-      写与写之间才需要排队。
+    - ``journal_mode=WAL``：rollback journal 下写者提交时要拿独占锁，与读
+      互相牵制；本应用的写事务要跨多轮工具调用，窗口长，牵连面就大。WAL 让
+      读写真正并行，写与写之间才需要排队。注意它减少的是相互等待，不是消除
+      写-写串行——实测同样的混合负载下快数倍，但并发上限仍由连接池决定。
     - ``busy_timeout``：遇到写锁时等多久再报 "database is locked"。sqlite3
       默认 5 秒，对一个可能同时有十几个请求提交的服务偏短。
     """
