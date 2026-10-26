@@ -81,7 +81,7 @@ class CreateScheduleTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "task_id": {"type": "integer"},
+            "task_id": {"type": "integer", "description": "要安排的任务 id"},
             "start_time": {"type": "string", "description": "ISO 8601"},
             "end_time": {"type": "string", "description": "ISO 8601"},
         },
@@ -116,12 +116,13 @@ class UpdateScheduleTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "schedule_id": {"type": "integer"},
-            "start_time": {"type": "string"},
-            "end_time": {"type": "string"},
+            "schedule_id": {"type": "integer", "description": "要修改的日程 id，必填"},
+            "start_time": {"type": "string", "description": "ISO 8601 UTC，新的开始时刻"},
+            "end_time": {"type": "string", "description": "ISO 8601 UTC，新的结束时刻"},
             "status": {
                 "type": "string",
                 "enum": ["proposed", "accepted", "completed", "cancelled"],
+                "description": "日程状态：待确认 / 已确认 / 已完成 / 已取消",
             },
             "is_locked": {"type": "boolean", "description": "锁定后自动规划不会移动该日程"},
         },
@@ -187,7 +188,7 @@ class DeleteScheduleTool(Tool):
     description = "删除单条日程。"
     input_schema = {
         "type": "object",
-        "properties": {"schedule_id": {"type": "integer"}},
+        "properties": {"schedule_id": {"type": "integer", "description": "要删除的日程 id"}},
         "required": ["schedule_id"],
         "additionalProperties": False,
     }

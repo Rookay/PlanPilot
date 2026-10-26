@@ -52,7 +52,7 @@ class GetTaskTool(Tool):
     description = "按 id 查询单个任务详情。"
     input_schema = {
         "type": "object",
-        "properties": {"task_id": {"type": "integer"}},
+        "properties": {"task_id": {"type": "integer", "description": "任务 id，来自 get_tasks 的返回"}},
         "required": ["task_id"],
         "additionalProperties": False,
     }
@@ -98,12 +98,16 @@ class CreateTaskTool(Tool):
         "type": "object",
         "properties": {
             "title": {"type": "string", "description": "任务名称"},
-            "description": {"type": "string"},
+            "description": {"type": "string", "description": "补充说明，可为空"},
             "estimated_duration": {
                 "type": "integer",
                 "description": "预计时长（分钟），默认 60",
             },
-            "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+            "priority": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "优先级，默认 medium；用户说“很急/优先”时传 high",
+            },
             "splittable": {"type": "boolean", "description": "是否允许拆成多个时间块"},
             "min_chunk_minutes": {"type": "integer", "description": "最小分段分钟数"},
             "max_chunk_minutes": {"type": "integer", "description": "最大分段分钟数"},
@@ -116,12 +120,12 @@ class CreateTaskTool(Tool):
             "deadline": {"type": "string", "description": "ISO 8601，可选"},
             "earliest_start": {"type": "string", "description": "ISO 8601，可选"},
             "preferred_time": {"type": "string", "description": "如 09:00"},
-            "category": {"type": "string"},
+            "category": {"type": "string", "description": "分类标签，如 学习 / 工作 / 生活，可为空"},
             "location_id": {"type": "integer", "description": "常用地点 id，可选"},
             "location": {"type": "string", "description": "临时地点名称或地址"},
-            "location_city": {"type": "string"},
-            "location_longitude": {"type": "number"},
-            "location_latitude": {"type": "number"},
+            "location_city": {"type": "string", "description": "临时地点所在城市，配合经纬度使用"},
+            "location_longitude": {"type": "number", "description": "临时地点经度（WGS84）"},
+            "location_latitude": {"type": "number", "description": "临时地点纬度（WGS84）"},
         },
         "required": ["title"],
         "additionalProperties": False,
@@ -149,29 +153,38 @@ class UpdateTaskTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "task_id": {"type": "integer"},
-            "title": {"type": "string"},
-            "description": {"type": "string"},
+            "task_id": {"type": "integer", "description": "要更新的任务 id，必填"},
+            "title": {"type": "string", "description": "新名称，只在要改名时传"},
+            "description": {"type": "string", "description": "新的补充说明"},
             "status": {
                 "type": "string",
                 "enum": ["pending", "in_progress", "completed", "cancelled"],
+                "description": "任务状态；标记完成优先用 complete_task",
             },
-            "priority": {"type": "string", "enum": ["low", "medium", "high"]},
-            "estimated_duration": {"type": "integer"},
-            "splittable": {"type": "boolean"},
-            "min_chunk_minutes": {"type": "integer"},
-            "max_chunk_minutes": {"type": "integer"},
-            "dependency_ids": {"type": "array", "items": {"type": "integer"}},
-            "start_time": {"type": "string"},
-            "deadline": {"type": "string"},
-            "earliest_start": {"type": "string"},
-            "preferred_time": {"type": "string"},
-            "category": {"type": "string"},
+            "priority": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "优先级；用户说“这个更急”时改成 high",
+            },
+            "estimated_duration": {"type": "integer", "description": "新的预计时长（分钟）"},
+            "splittable": {"type": "boolean", "description": "是否允许拆成多个时间块"},
+            "min_chunk_minutes": {"type": "integer", "description": "最小分段分钟数"},
+            "max_chunk_minutes": {"type": "integer", "description": "最大分段分钟数"},
+            "dependency_ids": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "整体替换的任务依赖 id 列表",
+            },
+            "start_time": {"type": "string", "description": "ISO 8601 UTC，固定开始时刻"},
+            "deadline": {"type": "string", "description": "ISO 8601 UTC，最晚完成时刻"},
+            "earliest_start": {"type": "string", "description": "ISO 8601 UTC，最早可开始时刻"},
+            "preferred_time": {"type": "string", "description": "偏好时段，如 09:00"},
+            "category": {"type": "string", "description": "分类标签"},
             "location_id": {"type": "integer", "description": "常用地点 id，可选"},
             "location": {"type": "string", "description": "临时地点名称或地址"},
-            "location_city": {"type": "string"},
-            "location_longitude": {"type": "number"},
-            "location_latitude": {"type": "number"},
+            "location_city": {"type": "string", "description": "临时地点所在城市"},
+            "location_longitude": {"type": "number", "description": "临时地点经度（WGS84）"},
+            "location_latitude": {"type": "number", "description": "临时地点纬度（WGS84）"},
         },
         "required": ["task_id"],
         "additionalProperties": False,
@@ -203,7 +216,7 @@ class CompleteTaskTool(Tool):
     description = "把任务标记为已完成。"
     input_schema = {
         "type": "object",
-        "properties": {"task_id": {"type": "integer"}},
+        "properties": {"task_id": {"type": "integer", "description": "任务 id，来自 get_tasks 的返回"}},
         "required": ["task_id"],
         "additionalProperties": False,
     }
@@ -229,7 +242,7 @@ class DeleteTaskTool(Tool):
     description = "删除任务（会级联删除其日程）。"
     input_schema = {
         "type": "object",
-        "properties": {"task_id": {"type": "integer"}},
+        "properties": {"task_id": {"type": "integer", "description": "任务 id，来自 get_tasks 的返回"}},
         "required": ["task_id"],
         "additionalProperties": False,
     }

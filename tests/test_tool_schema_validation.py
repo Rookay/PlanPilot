@@ -145,12 +145,16 @@ class ToolSchemaInvariantTests(TestCase):
         ]
         self.assertEqual(offenders, [], f"这些工具没声明 additionalProperties: false：{offenders}")
 
-    def test_every_property_has_a_type(self):
-        """每个参数都要有 type，否则校验器拿不到类型信息。
+    def test_every_property_has_a_type_and_description(self):
+        """每个参数都要有 type 和参数级 description。
 
-        注意这里**不**要求 description：目前 37 个工具里还有约 100 个参数没写
-        参数级说明（``update_task`` 18 个最多）。那是已知债，补起来是另一件事，
-        不该由一个"形状校验"的测试来拦——它会把无关改动挡在门外。
+        description 不是给人看的注释，是模型选参数时唯一的线索：``status`` 有四个
+        枚举值，光看枚举能猜到含义，但 ``splittable`` / ``earliest_start`` /
+        ``preferred_time`` 这类不给说明就只能靠猜，猜错的表现是"工具调了但结果
+        不对"，比直接报错更难排查。
+
+        $ref / anyOf 这类写法本身合法（例如坐标复用一个 ``$defs``），但描述仍要
+        写在同层——JSON Schema 2020-12 允许 ``$ref`` 带兄弟字段。
         """
 
         problems = []
@@ -159,10 +163,14 @@ class ToolSchemaInvariantTests(TestCase):
             parameters = function["parameters"]
             self.assertEqual(parameters.get("type"), "object", function["name"])
             for prop, spec in parameters.get("properties", {}).items():
-                # $ref / anyOf 这类本身就是合法写法（例如坐标复用一个 $defs）
-                if {"type", "$ref", "anyOf", "oneOf", "allOf"} & set(spec):
-                    continue
-                problems.append(f"{function['name']}.{prop} 缺 type")
+                # 类型可以由 $ref / anyOf 提供；description 不能由别处代劳。
+                has_type = "type" in spec or any(
+                    key in spec for key in ("$ref", "anyOf", "oneOf", "allOf")
+                )
+                if not has_type:
+                    problems.append(f"{function['name']}.{prop} 缺 type")
+                if not str(spec.get("description") or "").strip():
+                    problems.append(f"{function['name']}.{prop} 缺 description")
         self.assertEqual(problems, [])
 
     def test_required_fields_are_declared_in_properties(self):

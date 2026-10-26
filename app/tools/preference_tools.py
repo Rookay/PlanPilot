@@ -37,19 +37,29 @@ class UpdatePreferencesTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "timezone": {"type": "string"},
-            "default_location": {"type": "string"},
+            "timezone": {"type": "string", "description": "IANA 时区，如 Asia/Shanghai"},
+            "default_location": {"type": "string", "description": "默认活动地点名称"},
             "workday_start": {"type": "string", "description": "HH:MM"},
             "workday_end": {"type": "string", "description": "HH:MM"},
             "lunch_start": {"type": "string", "description": "HH:MM"},
             "lunch_end": {"type": "string", "description": "HH:MM"},
-            "default_task_duration_min": {"type": "integer"},
-            "default_gap_minutes": {"type": "integer"},
+            "default_task_duration_min": {
+                "type": "integer",
+                "description": "新建任务时的默认时长（分钟）",
+            },
+            "default_gap_minutes": {
+                "type": "integer",
+                "description": "相邻日程之间的默认空闲间隔（分钟）",
+            },
             "planning_strategy": {
                 "type": "string",
                 "enum": ["balanced", "deadline_first", "priority_first"],
+                "description": "默认排序策略：均衡 / 截止优先 / 优先级优先",
             },
-            "schedule_weekends": {"type": "boolean"},
+            "schedule_weekends": {
+                "type": "boolean",
+                "description": "是否把周末也纳入可安排时间",
+            },
         },
         "required": [],
         "additionalProperties": False,

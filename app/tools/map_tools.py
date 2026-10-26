@@ -20,7 +20,13 @@ class SearchPlacesTool(Tool):
         "properties": {
             "query": {"type": "string", "description": "地点名称或关键词"},
             "city": {"type": "string", "description": "限定城市，可选"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 5,
+                "description": "返回候选数量上限，默认 5",
+            },
         },
         "required": ["query"],
         "additionalProperties": False,
@@ -81,12 +87,19 @@ class EstimateTravelTimeTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "origin": {"$ref": "#/$defs/coordinate"},
-            "destination": {"$ref": "#/$defs/coordinate"},
+            "origin": {
+                "$ref": "#/$defs/coordinate",
+                "description": "起点坐标",
+            },
+            "destination": {
+                "$ref": "#/$defs/coordinate",
+                "description": "终点坐标",
+            },
             "mode": {
                 "type": "string",
                 "enum": ["walking", "driving", "transit"],
                 "default": "transit",
+                "description": "出行方式；打车场景用 driving 估算，因为路线引擎没有 taxi",
             },
             "city": {"type": "string", "description": "公交查询所需城市，可选"},
         },
@@ -96,8 +109,18 @@ class EstimateTravelTimeTool(Tool):
             "coordinate": {
                 "type": "object",
                 "properties": {
-                    "longitude": {"type": "number", "minimum": -180, "maximum": 180},
-                    "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+                    "longitude": {
+                        "type": "number",
+                        "minimum": -180,
+                        "maximum": 180,
+                        "description": "经度（WGS84）",
+                    },
+                    "latitude": {
+                        "type": "number",
+                        "minimum": -90,
+                        "maximum": 90,
+                        "description": "纬度（WGS84）",
+                    },
                 },
                 "required": ["longitude", "latitude"],
                 "additionalProperties": False,

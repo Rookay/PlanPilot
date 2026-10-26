@@ -59,8 +59,8 @@ class GeneratePlanTool(Tool):
                 "items": {
                     "type": "object",
                     "properties": {
-                        "start": {"type": "string"},
-                        "end": {"type": "string"},
+                        "start": {"type": "string", "description": "窗口开始 ISO 8601 UTC"},
+                        "end": {"type": "string", "description": "窗口结束 ISO 8601 UTC"},
                     },
                     "required": ["start", "end"],
                 },
@@ -198,27 +198,33 @@ class EvaluatePlanTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "start": {"type": "string"},
-            "days": {"type": "integer"},
+            "start": {"type": "string", "description": "评估起点 ISO 8601 UTC，默认当前时间"},
+            "days": {"type": "integer", "description": "评估天数，默认 7"},
             "windows": {
                 "type": "array",
+                "description": "只在指定时间窗口内试排，如今天晚上、明天下午",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "start": {"type": "string"},
-                        "end": {"type": "string"},
+                        "start": {"type": "string", "description": "窗口开始 ISO 8601 UTC"},
+                        "end": {"type": "string", "description": "窗口结束 ISO 8601 UTC"},
                     },
                     "required": ["start", "end"],
                 },
             },
-            "gap_minutes": {"type": "integer"},
+            "gap_minutes": {
+                "type": "integer",
+                "description": "相邻任务之间的最小空闲间隔（分钟），默认 0",
+            },
             "strategy": {
                 "type": "string",
                 "enum": ["balanced", "deadline_first", "priority_first"],
+                "description": "排序策略：均衡 / 截止优先 / 优先级优先",
             },
             "planning_mode": {
                 "type": "string",
                 "enum": ["auto", "quick", "optimized"],
+                "description": "规划方式：自动选择、快速安排或深度优化",
             },
         },
         "required": [],
@@ -254,20 +260,24 @@ class ComparePlanAlternativesTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "start": {"type": "string"},
-            "days": {"type": "integer"},
+            "start": {"type": "string", "description": "方案起点 ISO 8601 UTC，默认当前时间"},
+            "days": {"type": "integer", "description": "规划天数，默认 7"},
             "windows": {
                 "type": "array",
+                "description": "只在指定时间窗口内排，如今天晚上、明天下午",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "start": {"type": "string"},
-                        "end": {"type": "string"},
+                        "start": {"type": "string", "description": "窗口开始 ISO 8601 UTC"},
+                        "end": {"type": "string", "description": "窗口结束 ISO 8601 UTC"},
                     },
                     "required": ["start", "end"],
                 },
             },
-            "gap_minutes": {"type": "integer"},
+            "gap_minutes": {
+                "type": "integer",
+                "description": "相邻任务之间的最小空闲间隔（分钟），默认 0",
+            },
         },
         "required": [],
         "additionalProperties": False,
@@ -305,6 +315,8 @@ class ApplyPlanAlternativeTool(Tool):
             "profile": {
                 "type": "string",
                 "enum": ["deadline", "balanced", "focus"],
+                "description": "要应用的方案：截止优先 deadline / 均衡 balanced / 集中处理 focus，"
+                "取值来自 compare_plan_alternatives 的返回",
             },
         },
         "required": ["profile"],
@@ -374,27 +386,33 @@ class ReplanTool(Tool):
     input_schema = {
         "type": "object",
         "properties": {
-            "start": {"type": "string"},
-            "days": {"type": "integer"},
+            "start": {"type": "string", "description": "重新规划起点 ISO 8601 UTC，默认当前时间"},
+            "days": {"type": "integer", "description": "重排天数，默认 7"},
             "windows": {
                 "type": "array",
+                "description": "只在指定时间窗口内重排，如今天晚上、明天下午",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "start": {"type": "string"},
-                        "end": {"type": "string"},
+                        "start": {"type": "string", "description": "窗口开始 ISO 8601 UTC"},
+                        "end": {"type": "string", "description": "窗口结束 ISO 8601 UTC"},
                     },
                     "required": ["start", "end"],
                 },
             },
-            "gap_minutes": {"type": "integer"},
+            "gap_minutes": {
+                "type": "integer",
+                "description": "相邻任务之间的最小空闲间隔（分钟），默认 0",
+            },
             "strategy": {
                 "type": "string",
                 "enum": ["balanced", "deadline_first", "priority_first"],
+                "description": "排序策略：均衡 / 截止优先 / 优先级优先",
             },
             "planning_mode": {
                 "type": "string",
                 "enum": ["auto", "quick", "optimized"],
+                "description": "规划方式：自动选择、快速安排或深度优化",
             },
         },
         "required": [],
@@ -432,16 +450,24 @@ class LocalReplanTool(Tool):
         "properties": {
             "start": {"type": "string", "description": "范围开始时间 ISO 8601 UTC"},
             "end": {"type": "string", "description": "范围结束时间 ISO 8601 UTC"},
-            "gap_minutes": {"type": "integer"},
+            "gap_minutes": {
+                "type": "integer",
+                "description": "相邻任务之间的最小空闲间隔（分钟），默认 0",
+            },
             "strategy": {
                 "type": "string",
                 "enum": ["balanced", "deadline_first", "priority_first"],
+                "description": "排序策略：均衡 / 截止优先 / 优先级优先",
             },
             "planning_mode": {
                 "type": "string",
                 "enum": ["auto", "quick", "optimized"],
+                "description": "规划方式：自动选择、快速安排或深度优化",
             },
-            "include_unscheduled": {"type": "boolean"},
+            "include_unscheduled": {
+                "type": "boolean",
+                "description": "是否把此前没排上的任务也纳入本次重排，默认 true",
+            },
         },
         "required": ["start", "end"],
         "additionalProperties": False,
