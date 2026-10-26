@@ -16,5 +16,11 @@ schedule.db
 .idea/
 .vscode/
 
+# Word 打开文档时生成的锁文件
+~$*
+
+# 文档构建中间产物（md 与脚本仍入库）
+docs/resume/build/*.html
+
 # 本地工作 memory（项目级），不入仓库
 .workbuddy/
