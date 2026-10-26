@@ -65,6 +65,10 @@ class AgentResult:
     selected_skill: Optional[str] = None
     #: 场景来源：keyword（规则先验）/ model（模型自选）/ none（通用模式）。
     skill_source: str = "none"
+    #: 本轮实际使用的 provider 名称（真实模型或降级后的本地规则）。
+    #: 不放在 ``AgentLoop`` 上：那是全局单例，并发请求会互相覆盖，
+    #: 于是 A 请求的界面会显示成 B 请求用的模型。
+    provider_name: Optional[str] = None
     #: 本轮完整的工具调用轨迹（call 与 observation 成对），供 API 层落库。
     #: 与 ``tool_calls`` 的区别：``tool_calls`` 是给界面看的摘要，字段为展示
     #: 服务（stage / label）；``trajectory`` 保留协议原貌，用于回放与排查。
@@ -208,7 +212,6 @@ class AgentLoop:
         self.skill_registry = skill_registry
         self.fallback_provider = MockProvider()
         self.llm_status = LLMStatus()
-        self.last_run_provider: Optional[str] = None
 
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
         # 轨迹在这里统一收口。工具 observation 分散在十来处 append，逐处记录既容易
@@ -367,6 +370,7 @@ class AgentLoop:
             skill_source=state.skill_source,
             confirmation=confirmation or ConfirmationInfo(),
             workflow_steps=workflow_steps or [],
+            provider_name=type(state.provider).__name__ if state.provider else None,
         )
 
     # ------------------------------------------------------------------
@@ -386,7 +390,6 @@ class AgentLoop:
             state.saturated_tools, state.active_tool_names
         )
         try:
-            self.last_run_provider = provider.__class__.__name__
             response = provider.chat(state.messages, tools=tool_schemas)
             if provider is self.llm:
                 self._record_success()
@@ -413,7 +416,7 @@ class AgentLoop:
 
     def _fallback_response(self, state: _RunState, notice: str):
         """降级到本地规则 provider，并把降级原因写进上下文。"""
-        self.last_run_provider = self.fallback_provider.__class__.__name__
+        state.provider = self.fallback_provider
         state.messages.append({"role": "system", "content": notice})
         return self.fallback_provider.chat(
             state.messages,

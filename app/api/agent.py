@@ -234,7 +234,9 @@ def _chat_once(
     provider_name = (
         "ConfirmationExecutor"
         if payload.confirm_action_id
-        else agent.loop.last_run_provider or agent.loop.llm.__class__.__name__
+        # 从 result 取而不是从 agent.loop 取：loop 是全局单例，并发时
+        # 后一个请求会覆盖前一个的 provider，界面就会显示错。
+        else result.provider_name or agent.loop.llm.__class__.__name__
     )
     leading_steps = []
     if payload.message.strip():
