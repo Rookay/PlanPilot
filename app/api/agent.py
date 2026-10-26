@@ -63,6 +63,13 @@ def reconnect_model():
     return reconnect_agent()
 
 
+@router.get("/sessions")
+def list_sessions(limit: int = 50, db: Session = Depends(get_db)):
+    """会话列表，按最近活跃倒序。前端据此展示历史并支持切换。"""
+
+    return chat_service.list_sessions(db, limit=limit)
+
+
 @router.get("/sessions/{session_id}/messages", response_model=List[ChatMessageResponse])
 def session_messages(session_id: str, db: Session = Depends(get_db)):
     return (
@@ -73,12 +80,16 @@ def session_messages(session_id: str, db: Session = Depends(get_db)):
     )
 
 
-@router.delete("/sessions/{session_id}/messages")
-def clear_session_messages(session_id: str, db: Session = Depends(get_db)):
+def _purge_session(db: Session, session_id: str) -> dict:
+    """删除一个会话的全部痕迹：消息、运行记录、摘要（连带工具轨迹）。
+
+    摘要必须一起删：它存的是被删掉那些消息的归纳，留着等于"清空会话"没清干净，
+    下一轮还会把旧对话的约束重新注入 prompt。轨迹由 ``clear_messages`` 连带
+    清理，理由相同——单独留一份调用记录会让回看时对不上号。
+    """
+
     deleted = chat_service.clear_messages(db, session_id)
     deleted_runs = agent_run_service.clear_runs(db, session_id)
-    # 摘要必须一起删：它存的是被删掉那些消息的归纳，留着等于"清空会话"没清干净，
-    # 下一轮还会把旧对话的约束重新注入 prompt。
     deleted_summary = summary_service.clear_summary(db, session_id)
     db.commit()
     # 没有进程内缓存要清理：历史每次请求都从表里读，删表即生效。
@@ -87,6 +98,18 @@ def clear_session_messages(session_id: str, db: Session = Depends(get_db)):
         "deleted_runs": deleted_runs,
         "deleted_summary": deleted_summary,
     }
+
+
+@router.delete("/sessions/{session_id}/messages")
+def clear_session_messages(session_id: str, db: Session = Depends(get_db)):
+    return _purge_session(db, session_id)
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str, db: Session = Depends(get_db)):
+    """删除整个会话。与清空消息等价，只是语义更贴前端那个"删除"按钮。"""
+
+    return _purge_session(db, session_id)
 
 
 @router.get("/sessions/{session_id}/runs")

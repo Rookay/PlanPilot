@@ -262,3 +262,99 @@ class ApiWorkflowTests(TestCase):
         schedules = self.client.get("/api/schedules").json()
         restored = next(item for item in schedules if item["id"] == schedule_id)
         self.assertFalse(restored["is_locked"])
+
+
+class SessionListingTests(TestCase):
+    """会话列表与删除。
+
+    补的是前端"看不到历史"的那个洞：数据一直在 ``chat_messages`` 里，缺的是
+    一个能列出所有会话的入口。
+    """
+
+    def setUp(self):
+        self.time_patcher = patch(
+            "app.services.time_policy.utcnow",
+            return_value=datetime(2026, 9, 15),
+        )
+        self.time_patcher.start()
+        self.db = make_session()
+        application = FastAPI()
+        application.include_router(agent.router)
+
+        def _db_override():
+            yield self.db
+
+        application.dependency_overrides[get_db] = _db_override
+        self.client = TestClient(application)
+
+    def tearDown(self):
+        self.client.close()
+        self.db.close()
+        self.time_patcher.stop()
+
+    def _add(self, session_id, role, content, day):
+        from datetime import datetime as dt
+
+        from app.models.chat import ChatMessage
+
+        self.db.add(
+            ChatMessage(
+                session_id=session_id,
+                role=role,
+                content=content,
+                created_at=dt(2026, 9, day, 10, 0, 0),
+            )
+        )
+        self.db.commit()
+
+    def test_orders_by_recent_activity(self):
+        self._add("older", "user", "上个月的问题", 1)
+        self._add("newer", "user", "昨天的问题", 5)
+        self._add("older", "assistant", "上个月的回答", 2)
+
+        sessions = self.client.get("/api/agent/sessions").json()
+
+        self.assertEqual([item["session_id"] for item in sessions], ["newer", "older"])
+
+    def test_title_uses_first_user_message_and_preview_uses_last(self):
+        self._add("s1", "user", "第一个问题", 1)
+        self._add("s1", "assistant", "已为你处理", 2)
+        self._add("s1", "user", "第二个问题", 3)
+
+        session = self.client.get("/api/agent/sessions").json()[0]
+
+        # 助手回复常以"已为你…"开头，第一句人话更能代表会话在聊什么。
+        self.assertEqual(session["title"], "第一个问题")
+        self.assertEqual(session["preview"], "第二个问题")
+        self.assertEqual(session["message_count"], 3)
+
+    def test_session_without_user_message_still_listed(self):
+        self._add("legacy", "assistant", "只有助手消息", 1)
+
+        session = self.client.get("/api/agent/sessions").json()[0]
+
+        self.assertEqual(session["title"], "（无用户消息）")
+        self.assertEqual(session["message_count"], 1)
+
+    def test_limit_caps_result(self):
+        for index in range(3):
+            self._add(f"s{index}", "user", f"问题{index}", index + 1)
+
+        sessions = self.client.get("/api/agent/sessions?limit=2").json()
+
+        self.assertEqual(len(sessions), 2)
+
+    def test_delete_session_removes_it_from_list(self):
+        self._add("keep", "user", "保留", 1)
+        self._add("drop", "user", "删掉", 2)
+        self._add("drop", "assistant", "回复", 3)
+
+        response = self.client.delete("/api/agent/sessions/drop")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["deleted"], 2)
+        remaining = [item["session_id"] for item in self.client.get("/api/agent/sessions").json()]
+        self.assertEqual(remaining, ["keep"])
+
+    def test_empty_database_returns_empty_list(self):
+        self.assertEqual(self.client.get("/api/agent/sessions").json(), [])

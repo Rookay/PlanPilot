@@ -20,6 +20,7 @@
 
 from typing import List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.chat import ChatMessage
@@ -171,3 +172,67 @@ def message_count(db: Session, session_id: str) -> int:
     return (
         db.query(ChatMessage).filter(ChatMessage.session_id == session_id).count()
     )
+
+
+def list_sessions(db: Session, limit: int = 50) -> List[dict]:
+    """按最近活跃排序的会话概览，供前端会话列表使用。
+
+    前端原先只认 localStorage 里那一个 ``session_id``，换 origin 或清缓存就
+    "看不到历史"——数据一直在表里，只是没有入口。这里补的是那个入口。
+
+    ``title`` 取首条 user 消息：助手回复通常以"已为你…"开头，第一句人话更能
+    代表这个会话在聊什么。``preview`` 取最后一条消息，用来显示讲到哪儿了。
+
+    三次查询而不是 N+1：聚合一次拿会话，再各取首条 user / 末条消息的内容。
+    """
+
+    aggregates = (
+        db.query(
+            ChatMessage.session_id.label("session_id"),
+            func.count(ChatMessage.id).label("message_count"),
+            func.max(ChatMessage.created_at).label("last_at"),
+            func.max(ChatMessage.id).label("last_id"),
+        )
+        .group_by(ChatMessage.session_id)
+        .order_by(func.max(ChatMessage.created_at).desc())
+        .limit(limit)
+        .all()
+    )
+    if not aggregates:
+        return []
+
+    session_ids = [row.session_id for row in aggregates]
+
+    # 每个会话第一条 user 消息的 id（可能没有 user 消息，比如 legacy）。
+    first_user_ids = dict(
+        db.query(ChatMessage.session_id, func.min(ChatMessage.id))
+        .filter(
+            ChatMessage.session_id.in_(session_ids),
+            ChatMessage.role == "user",
+        )
+        .group_by(ChatMessage.session_id)
+        .all()
+    )
+
+    wanted_ids = list(first_user_ids.values()) + [row.last_id for row in aggregates]
+    contents = {
+        message.id: message.content
+        for message in db.query(ChatMessage)
+        .filter(ChatMessage.id.in_(wanted_ids))
+        .all()
+    }
+
+    sessions: List[dict] = []
+    for row in aggregates:
+        title = contents.get(first_user_ids.get(row.session_id), "")
+        preview = contents.get(row.last_id, "")
+        sessions.append(
+            {
+                "session_id": row.session_id,
+                "message_count": row.message_count,
+                "last_message_at": row.last_at,
+                "title": (title or "（无用户消息）").strip().replace("\n", " ")[:40],
+                "preview": (preview or "").strip().replace("\n", " ")[:60],
+            }
+        )
+    return sessions
