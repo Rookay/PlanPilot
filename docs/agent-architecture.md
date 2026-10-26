@@ -145,7 +145,8 @@ mine/
 8. **Event 无前端 UI**：Agent 后续会产出 Event，但用户当前无法在界面上管理，需要补齐前端。
 9. **时区假设**：全系统统一 naive UTC，前端负责转换；对单用户可接受，但接入天气/交通等外部工具时需要「用户本地时区」上下文。
 10. **`ensure_schema` 迁移能力有限**：只补 `tasks.start_time`，未来加列需要手动扩展迁移逻辑。
-11. **Chat 表结构未来会变**：当前 `chat_messages` 无 `session_id`，多会话时需要改造。
+11. **Chat 表结构会继续变**：`chat_messages` 已有 `session_id` 与 `agent_run_id`，
+    `chat_tool_calls` 也已落表；仍未做的是把轨迹**重放**回模型上下文（当前刻意不做）。
 12. **无鉴权/多用户**：当前是单用户假设，Agent 阶段可继续接受，但要记录。
 
 ---
@@ -573,7 +574,7 @@ class ContextBuilder:
 
 | 层 | 载体 | 职责 | 进 prompt |
 |---|---|---|---|
-| 层一 聊天记录 | `chat_messages` | 全量流水，只增不改，回答「当时说了什么」 | 否（不进提示词） |
+| 层一 聊天记录 | `chat_messages` + `chat_tool_calls` | 全量流水，只增不改，回答「当时说了什么、调了什么」 | 否（不进提示词） |
 | 层二 context | `session_summaries` + 预算常量 | 给模型的压缩版，回答「这轮该带多少」 | 是 |
 | 层三 memory | `context.py` 常量 / `user_preferences` / `memory_facts` | 跨会话稳定信息，回答「哪些是长期成立的」 | 是 |
 
@@ -581,9 +582,17 @@ class ContextBuilder:
 
 - 每次请求由 `chat_service.window_messages()` 从 `chat_messages` 读最近
   `SUMMARY_WINDOW_MESSAGES = 60` 条，进程内不缓存。
-- 落库在 API 层事务末尾统一完成；本轮 `assistant` 的 `tool_calls` 与工具结果
-  只活在局部 `messages` 里，不进入下一轮上下文（**已知缺口**：这些轨迹目前
-  没有落表，"全量"只对纯文本成立）。
+- 文本与轨迹分开存、一起删：
+  - `chat_messages` 存用户与助手的对话文本，进窗口；
+  - `chat_tool_calls` 存每次工具调用的 `tool_call_id` / 名称 / 原始参数 /
+    成败 / 返回体（`TRAJECTORY_RESULT_CHARS = 4000` 截断并记原始长度），
+    **只做审计与回放，不进窗口**——历史里的工具返回值早已过时，喂回模型会变成
+    错误前提，还会挤占预算。
+- 轨迹在 `AgentLoop.run()` 里统一收口：把局部 `messages` 交给一个请求内可变容器，
+  循环结束后按 `tool_call_id` 把 call 与 observation 配对。逐处 append 记录会漏，
+  也会让主循环被审计代码淹没。配对失败的调用保留（`success=false` + 原因），
+  因为「调了没拿到结果」和「根本没调」是两种故障。
+- 落库在 API 层事务末尾统一完成，和消息、`agent_runs` 同生同死；清空会话一并删除。
 - 多 worker 与进程重启都不需要额外同步，代价是每请求一次带索引的查询。
 
 ### 9.2 层二：context（摘要 + 预算）
