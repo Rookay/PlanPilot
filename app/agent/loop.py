@@ -9,7 +9,7 @@ import os
 import random
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -89,6 +89,55 @@ class LLMStatus:
     last_error_message: Optional[str] = None
     last_success_at: Optional[float] = None
     fallback_until: float = 0.0
+
+
+@dataclass
+class _RunState:
+    """单次请求的可变状态。
+
+    这些字段原本是 ``_run_loop`` 里的十来个局部变量。抽出来的理由不是"少写
+    几行参数"，而是让每个阶段方法只读写自己关心的字段——主循环因此能收回
+    二十行，读的人不必同时记住十几个计数器的当前值。
+    """
+
+    db: Session
+    session_id: str
+    holder: dict
+    messages: List[dict]
+    provider: LLMProvider
+    #: 当前生效的场景；``None`` 表示通用模式。模型可通过 select_skill 覆盖初值。
+    selected_skill: Any = None
+    #: 场景来源：keyword（规则先验）/ model（模型自选）/ none（通用模式）。
+    skill_source: str = "none"
+    #: 当前场景的工具白名单；``None`` 表示不限制。
+    active_tool_names: Optional[set] = None
+    skill_switch_count: int = 0
+    tool_call_log: List[dict] = field(default_factory=list)
+    applied_changes: List[dict] = field(default_factory=list)
+    proposed_schedules: List[dict] = field(default_factory=list)
+    tool_call_count: int = 0
+    argument_parse_errors: int = 0
+    #: 去重用的 "工具名+参数" 指纹集合。
+    seen_calls: set = field(default_factory=set)
+    tool_call_counts: dict = field(default_factory=dict)
+    #: 本轮已用满预算的工具，下一轮不再出现在 tools 数组里。
+    saturated_tools: set = field(default_factory=set)
+    usage: dict = field(
+        default_factory=lambda: {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+
+
+@dataclass
+class _PendingConfirm:
+    """同一轮里攒下的待确认变更，最后合并成一次确认请求。"""
+
+    calls: List[dict] = field(default_factory=list)
+    summaries: List[str] = field(default_factory=list)
+    previews: List[dict] = field(default_factory=list)
 
 
 class AgentLoop:
@@ -173,6 +222,47 @@ class AgentLoop:
         )
         return result
 
+    # ------------------------------------------------------------------
+    # 单次请求的状态
+    # ------------------------------------------------------------------
+
+    def _begin_run(self, db: Session, message: str, session_id: str, holder: dict) -> _RunState:
+        """准备一次请求的可变状态。
+
+        不在这里登记用户消息：历史由 ``_build_messages`` 从 chat_messages 表按需
+        读取，落库由 API 层统一在事务末尾完成。中间产生的 assistant / tool 消息只
+        活在本次请求的 ``messages`` 里，不进入下一轮的上下文——但会作为轨迹落库，
+        供回看与排查（不参与下一轮 prompt）。
+
+        关键词路由只提供"先验"：命中就用，后续模型可通过 select_skill 覆盖。
+        """
+        selected_skill = (
+            self.skill_registry.select(message) if self.skill_registry is not None else None
+        )
+        active_tool_names = None
+        if selected_skill is not None and selected_skill.allowed_tools is not None:
+            active_tool_names = set(selected_skill.allowed_tools)
+
+        messages = self._build_messages(db, session_id, message, selected_skill)
+        # 交给调用方持有引用：后续所有 append 都发生在这个同一个 list 上，
+        # 循环提前 return 也能拿到截至目前完整的轨迹。
+        holder["messages"] = messages
+
+        return _RunState(
+            db=db,
+            session_id=session_id,
+            holder=holder,
+            messages=messages,
+            provider=self.llm,
+            selected_skill=selected_skill,
+            skill_source="keyword" if selected_skill is not None else "none",
+            active_tool_names=active_tool_names,
+        )
+
+    # ------------------------------------------------------------------
+    # 主循环
+    # ------------------------------------------------------------------
+
     def _run_loop(
         self,
         db: Session,
@@ -180,552 +270,497 @@ class AgentLoop:
         session_id: str,
         holder: dict,
     ) -> AgentResult:
-        # 不在这里登记用户消息：历史由 _build_messages 从 chat_messages 表按需读取，
-        # 落库由 API 层统一在事务末尾完成。中间产生的 assistant / tool 消息只活在
-        # 本轮局部变量 messages 里，不进入下一轮的上下文——但会作为轨迹落库，
-        # 供回看与排查（不参与下一轮 prompt）。
-
-        # 关键词路由只提供"先验"：命中就用，后续模型可通过 select_skill 覆盖。
-        selected_skill = (
-            self.skill_registry.select(message)
-            if self.skill_registry is not None
-            else None
-        )
-        skill_source = "keyword" if selected_skill is not None else "none"
-        skill_switch_count = 0
-        active_tool_names = (
-            set(selected_skill.allowed_tools)
-            if selected_skill is not None and selected_skill.allowed_tools is not None
-            else None
-        )
-        messages = self._build_messages(db, session_id, message, selected_skill)
-        # 交给调用方持有引用：后续所有 append 都发生在这个同一个 list 上，
-        # 循环提前 return 也能拿到截至目前完整的轨迹。
-        holder["messages"] = messages
-
-        tool_call_log: List[dict] = []
-        applied_changes: List[dict] = []
-        proposed_schedules: List[dict] = []
-        tool_call_count = 0
-        argument_parse_errors = 0
-        seen_calls: set[str] = set()
-        tool_call_counts: dict[str, int] = {}
-        saturated_tools: set[str] = set()
-        model_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        provider = self.llm
+        state = self._begin_run(db, message, session_id, holder)
         started = time.monotonic()
 
         for _ in range(self.MAX_ITERATIONS):
             # 每轮先核预算：12 轮累积的工具结果可能远超单条上限。
-            self._enforce_prompt_budget(messages)
+            self._enforce_prompt_budget(state.messages)
 
-            elapsed = time.monotonic() - started
-            if elapsed >= self.RUN_DEADLINE_SECONDS:
-                # 不再调模型做总结：那正是要避免的额外等待，而且超时点通常已经
-                # 是"预算耗尽"的状态，再问一次只会得到又一段冗长的计划。
-                return AgentResult(
-                    reply=(
-                        f"这次请求已经跑了 {int(elapsed)} 秒，超过单次上限 "
-                        f"{int(self.RUN_DEADLINE_SECONDS)} 秒，我先停在这里。"
-                        f"已经完成 {tool_call_count} 次工具调用，结果都保留着；"
-                        "如果还差一步，继续告诉我就行。"
-                    ),
-                    session_id=session_id,
-                    tool_calls=tool_call_log,
-                    applied_changes=applied_changes,
-                    proposed_schedules=proposed_schedules,
-                    model_usage=model_usage,
-                    selected_skill=(
-                        selected_skill.name if selected_skill is not None else None
-                    ),
-                    skill_source=skill_source,
-                    workflow_steps=[
-                        {
-                            "kind": "deadline",
-                            "stage": "截断",
-                            "name": "run_deadline",
-                            "label": "达到单次请求时长上限",
-                            "status": "warning",
-                            "summary": (
-                                f"已执行 {tool_call_count} 次工具调用后主动中止，"
-                                "剩余步骤未执行。已完成的改动不会回滚。"
-                            ),
-                            "duration_ms": int(elapsed * 1000),
-                        }
-                    ],
-                )
+            deadline = self._deadline_result(state, started)
+            if deadline is not None:
+                return deadline
 
-            provider = self._pick_provider()
-            used_real = provider is self.llm
-            try:
-                self.last_run_provider = provider.__class__.__name__
-                response = provider.chat(
-                    messages,
-                    tools=self._available_tool_schemas(
-                        saturated_tools,
-                        active_tool_names,
-                    ),
-                )
-                if used_real:
-                    self._record_success()
-            except LLMAuthError as exc:
-                logger.warning("LLM authentication failed: %s", exc)
-                self._mark_auth_failed(exc)
-                self.last_run_provider = self.fallback_provider.__class__.__name__
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "真实模型鉴权失败,已永久切换到本地规则模式。"
-                            f"错误摘要:{exc}"
-                        ),
-                    }
-                )
-                response = self.fallback_provider.chat(
-                    messages,
-                    tools=self._available_tool_schemas(
-                        saturated_tools,
-                        active_tool_names,
-                    ),
-                )
-            except (LLMRateLimitError, LLMTransientError) as exc:
-                kind = "rate_limit" if isinstance(exc, LLMRateLimitError) else "transient"
-                logger.warning("LLM %s, using fallback: %s", kind, exc)
-                self._mark_failure(kind, exc)
-                self.last_run_provider = self.fallback_provider.__class__.__name__
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "真实模型暂时不可用，已切换到本地规则模式。"
-                            f"错误摘要：{exc}"
-                        ),
-                    }
-                )
-                response = self.fallback_provider.chat(
-                    messages,
-                    tools=self._available_tool_schemas(
-                        saturated_tools,
-                        active_tool_names,
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Unexpected LLM error, using fallback")
-                self._mark_failure("transient", exc)
-                self.last_run_provider = self.fallback_provider.__class__.__name__
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "真实模型暂时不可用，已切换到本地规则模式。"
-                            f"错误摘要：{exc}"
-                        ),
-                    }
-                )
-                response = self.fallback_provider.chat(
-                    messages,
-                    tools=self._available_tool_schemas(
-                        saturated_tools,
-                        active_tool_names,
-                    ),
-                )
-
-            self._merge_usage(model_usage, response.usage)
+            response = self._call_model(state)
+            self._merge_usage(state.usage, response.usage)
 
             if response.is_text() or not response.tool_calls:
-                reply = response.text or "（模型未返回内容）"
-                return AgentResult(
-                    reply=reply,
-                    session_id=session_id,
-                    tool_calls=tool_call_log,
-                    applied_changes=applied_changes,
-                    proposed_schedules=proposed_schedules,
-                    model_usage=model_usage,
-                    selected_skill=selected_skill.name if selected_skill is not None else None,
-                    skill_source=skill_source,
-                )
+                return self._result(state, response.text or "（模型未返回内容）")
 
             # 先记录本轮 assistant 消息（原样回传 reasoning_content 等字段）。
-            messages.append(self._assistant_message(response))
+            state.messages.append(self._assistant_message(response))
 
-            pending_confirm_calls: List[dict] = []
-            pending_summaries: List[str] = []
-            pending_previews: List[dict] = []
+            pending = self._handle_tool_calls(state, response.tool_calls)
+            if pending is not None:
+                return pending
 
-            for call in response.tool_calls:
-                tool = self.registry.get(call.name)
-                call_key = self._call_key(call.name, call.arguments)
+            if state.tool_call_count >= self.MAX_TOOL_CALLS:
+                return self._reasoning_only_result(state)
 
-                # 参数不是合法 JSON 对象：不执行工具，把解析说明当作 Observation。
-                # 必须与"字段缺失"分开——退化成空字典会让模型以为只是漏填，
-                # 于是反复补字段而不去修语法；参数全可选的工具还会静默执行成宽松查询。
-                if call.parse_error:
-                    argument_parse_errors += 1
-                    tool_call_count += 1
-                    messages.append(
-                        self._tool_message(call.id, call.name, False, error=call.parse_error)
-                    )
-                    tool_call_log.append(
-                        {
-                            "stage": "理解",
-                            "name": call.name,
-                            "arguments": call.arguments,
-                            "success": False,
-                            "summary": call.parse_error,
-                            "duration_ms": 0,
-                            "argument_error": True,
-                        }
-                    )
-                    if argument_parse_errors >= self.MAX_ARGUMENT_PARSE_ERRORS:
-                        reply = self._finalize_without_tools(
-                            provider,
-                            messages,
-                            tool_call_log,
-                            proposed_schedules,
-                            model_usage,
-                        )
-                        return AgentResult(
-                            reply=reply,
-                            session_id=session_id,
-                            tool_calls=tool_call_log,
-                            applied_changes=applied_changes,
-                            proposed_schedules=proposed_schedules,
-                            model_usage=model_usage,
-                            selected_skill=(
-                                selected_skill.name if selected_skill is not None else None
-                            ),
-                            skill_source=skill_source,
-                        )
-                    continue
+        return self._reasoning_only_result(state)
 
-                if tool is None:
-                    messages.append(self._tool_message(call.id, call.name, False, f"unknown tool: {call.name}"))
-                    tool_call_log.append(
-                        {
-                            "stage": "执行",
-                            "name": call.name,
-                            "success": False,
-                            "summary": f"未知工具：{call.name}",
-                            "duration_ms": 0,
-                        }
-                    )
-                    continue
+    def _deadline_result(self, state: _RunState, started: float) -> Optional[AgentResult]:
+        """达到单次请求墙钟上限时收尾；未超时返回 None。
 
-                # 场景切换：不占普通工具预算（那是业务执行预算），但单独限次。
-                if call.name == self.SKILL_SWITCH_TOOL:
-                    skill_switch_count += 1
-                    if skill_switch_count > self.MAX_SKILL_SWITCHES:
-                        error = (
-                            f"本轮场景切换已达 {self.MAX_SKILL_SWITCHES} 次上限，"
-                            "请基于当前场景直接作答"
-                        )
-                        messages.append(
-                            self._tool_message(call.id, call.name, False, error=error)
-                        )
-                        tool_call_log.append(
-                            {
-                                "stage": "理解",
-                                "name": call.name,
-                                "arguments": call.arguments,
-                                "success": False,
-                                "limited": True,
-                                "summary": error,
-                                "duration_ms": 0,
-                            }
-                        )
-                        continue
-
-                    result = self.registry.execute(call.name, call.arguments, db)
-                    target = self._resolve_skill(result)
-                    if target is None:
-                        messages.append(
-                            self._tool_message(
-                                call.id,
-                                call.name,
-                                False,
-                                result.summary,
-                                None,
-                                result.error or "场景切换失败",
-                            )
-                        )
-                        tool_call_log.append(
-                            {
-                                "stage": "理解",
-                                "name": call.name,
-                                "arguments": call.arguments,
-                                "success": False,
-                                "summary": result.error or "场景切换失败",
-                                "duration_ms": 0,
-                            }
-                        )
-                        continue
-
-                    if selected_skill is not None and target.name == selected_skill.name:
-                        already = f"当前已在「{target.description}」场景，无需重复切换"
-                        messages.append(
-                            self._tool_message(
-                                call.id, call.name, True, already, {"name": target.name}
-                            )
-                        )
-                        tool_call_log.append(
-                            {
-                                "stage": "理解",
-                                "name": call.name,
-                                "arguments": call.arguments,
-                                "success": True,
-                                "summary": already,
-                                "duration_ms": 0,
-                            }
-                        )
-                        continue
-
-                    selected_skill = target
-                    skill_source = "model"
-                    active_tool_names = (
-                        set(target.allowed_tools)
-                        if target.allowed_tools is not None
-                        else None
-                    )
-                    # 先回 tool 结果（OpenAI 协议要求紧跟 tool_calls），再追加场景指引。
-                    messages.append(
-                        self._tool_message(
-                            call.id, call.name, True, result.summary, result.data
-                        )
-                    )
-                    messages.append(
-                        {"role": "system", "content": self._skill_hint_message(target)}
-                    )
-                    tool_call_log.append(
-                        {
-                            "stage": "理解",
-                            "name": call.name,
-                            "arguments": call.arguments,
-                            "success": True,
-                            "summary": result.summary,
-                            "duration_ms": 0,
-                        }
-                    )
-                    continue
-
-                if call_key in seen_calls:
-                    saturated_tools.add(call.name)
-                    error = "同一工具参数已经执行过，请根据已有结果直接作答"
-                    messages.append(
-                        self._tool_message(call.id, call.name, False, error=error)
-                    )
-                    tool_call_log.append(
-                        {
-                            "stage": self._tool_stage(call.name),
-                            "name": call.name,
-                            "arguments": call.arguments,
-                            "success": False,
-                            "limited": True,
-                            "summary": error,
-                            "duration_ms": 0,
-                        }
-                    )
-                    continue
-                seen_calls.add(call_key)
-
-                call_limit = self.TOOL_CALL_LIMITS.get(call.name)
-                previous_calls = tool_call_counts.get(call.name, 0)
-                if call_limit is not None and previous_calls >= call_limit:
-                    saturated_tools.add(call.name)
-                    error = (
-                        f"{call.name} 已达到本轮 {call_limit} 次调用上限；"
-                        "请使用已有结果完成回答"
-                    )
-                    messages.append(
-                        self._tool_message(call.id, call.name, False, error=error)
-                    )
-                    tool_call_log.append(
-                        {
-                            "stage": self._tool_stage(call.name),
-                            "name": call.name,
-                            "arguments": call.arguments,
-                            "success": False,
-                            "limited": True,
-                            "summary": error,
-                            "duration_ms": 0,
-                        }
-                    )
-                    continue
-                tool_call_counts[call.name] = previous_calls + 1
-                if call_limit is not None and previous_calls + 1 >= call_limit:
-                    saturated_tools.add(call.name)
-
-                # confirm 级别：收集同一轮的全部变更，稍后合并成一次确认。
-                if tool.confirmation == "confirm":
-                    preview_started = time.perf_counter()
-                    preview = self.registry.preview(call.name, call.arguments, db)
-                    preview_duration = int(
-                        (time.perf_counter() - preview_started) * 1000
-                    )
-                    if not preview.success:
-                        messages.append(
-                            self._tool_message(
-                                call.id,
-                                call.name,
-                                False,
-                                error=preview.error or "无法生成操作预览",
-                            )
-                        )
-                        tool_call_log.append(
-                            {
-                                "name": call.name,
-                                "arguments": call.arguments,
-                                "success": False,
-                                "summary": preview.error,
-                                "duration_ms": preview_duration,
-                            }
-                        )
-                        continue
-                    pending_confirm_calls.append(
-                        {"name": call.name, "args": call.arguments}
-                    )
-                    # 记下 id：这轮结束后 messages 里不会有它的 observation，
-                    # 痕迹采集需要据此把它标成"等确认"而不是"被中断"。
-                    holder.setdefault("awaiting_ids", set()).add(call.id)
-                    pending_summaries.append(
-                        preview.summary or f"即将执行 {call.name}"
-                    )
-                    if preview.data is not None:
-                        pending_previews.append(preview.data)
-                    tool_call_log.append(
-                        {
-                            "stage": self._tool_stage(call.name),
-                            "name": call.name,
-                            "arguments": call.arguments,
-                            "success": True,
-                            "summary": preview.summary,
-                            "duration_ms": preview_duration,
-                            "awaiting_confirmation": True,
-                        }
-                    )
-                    continue
-
-                # 执行并观察结果。
-                execute_started = time.perf_counter()
-                result = self.registry.execute(call.name, call.arguments, db)
-                execute_duration = int(
-                    (time.perf_counter() - execute_started) * 1000
-                )
-                tool_call_count += 1
-
-                tool_call_log.append(
-                    {
-                        "stage": self._tool_stage(call.name),
-                        "name": call.name,
-                        "arguments": call.arguments,
-                        "success": result.success,
-                        "summary": result.summary,
-                        "duration_ms": execute_duration,
-                    }
-                )
-
-                if result.success and tool.confirmation != "none":
-                    applied_changes.append(
-                        {
-                            "name": call.name,
-                            "summary": result.summary,
-                            "data": result.data,
-                        }
-                    )
-                    if (
-                        call.name in ("generate_plan", "replan")
-                        and isinstance(result.data, dict)
-                        and isinstance(result.data.get("schedules"), list)
-                    ):
-                        proposed_schedules = result.data["schedules"]
-
-                messages.append(
-                    self._tool_message(
-                        call.id,
-                        call.name,
-                        result.success,
-                        result.summary,
-                        result.data,
-                        result.error,
-                    )
-                )
-
-            if pending_confirm_calls:
-                if len(pending_summaries) == 1:
-                    confirmation_summary = pending_summaries[0]
-                else:
-                    confirmation_summary = (
-                        f"将执行 {len(pending_summaries)} 项操作："
-                        + "；".join(pending_summaries)
-                    )
-                combined_preview = (
-                    pending_previews[0]
-                    if len(pending_previews) == 1
-                    else {"items": pending_previews}
-                )
-                action_id = self.confirmation_store.create(
-                    db=db,
-                    tool_calls=pending_confirm_calls,
-                    summary=confirmation_summary,
-                    preview=combined_preview,
-                    session_id=session_id,
-                )
-                confirmation_reply = f"需要你确认：{confirmation_summary}"
-                return AgentResult(
-                    reply=confirmation_reply,
-                    session_id=session_id,
-                    tool_calls=tool_call_log,
-                    applied_changes=applied_changes,
-                    proposed_schedules=proposed_schedules,
-                    confirmation=ConfirmationInfo(
-                        required=True,
-                        action_id=action_id,
-                        summary=confirmation_summary,
-                        changes=[
-                            {"name": item["name"], "arguments": item["args"]}
-                            for item in pending_confirm_calls
-                        ],
-                        preview=combined_preview,
+        不调模型做总结：那正是要避免的额外等待，而且超时点通常已经是
+        "预算耗尽"的状态，再问一次只会得到又一段冗长的计划。
+        """
+        elapsed = time.monotonic() - started
+        if elapsed < self.RUN_DEADLINE_SECONDS:
+            return None
+        return self._result(
+            state,
+            f"这次请求已经跑了 {int(elapsed)} 秒，超过单次上限 "
+            f"{int(self.RUN_DEADLINE_SECONDS)} 秒，我先停在这里。"
+            f"已经完成 {state.tool_call_count} 次工具调用，结果都保留着；"
+            "如果还差一步，继续告诉我就行。",
+            workflow_steps=[
+                {
+                    "kind": "deadline",
+                    "stage": "截断",
+                    "name": "run_deadline",
+                    "label": "达到单次请求时长上限",
+                    "status": "warning",
+                    "summary": (
+                        f"已执行 {state.tool_call_count} 次工具调用后主动中止，"
+                        "剩余步骤未执行。已完成的改动不会回滚。"
                     ),
-                    model_usage=model_usage,
-                    selected_skill=selected_skill.name if selected_skill is not None else None,
-                    skill_source=skill_source,
-                )
-
-            if tool_call_count >= self.MAX_TOOL_CALLS:
-                reply = self._finalize_without_tools(
-                    provider,
-                    messages,
-                    tool_call_log,
-                    proposed_schedules,
-                    model_usage,
-                )
-                return AgentResult(
-                    reply=reply,
-                    session_id=session_id,
-                    tool_calls=tool_call_log,
-                    applied_changes=applied_changes,
-                    proposed_schedules=proposed_schedules,
-                    model_usage=model_usage,
-                    selected_skill=selected_skill.name if selected_skill is not None else None,
-                    skill_source=skill_source,
-                )
-
-        reply = self._finalize_without_tools(
-            provider,
-            messages,
-            tool_call_log,
-            proposed_schedules,
-            model_usage,
+                    "duration_ms": int(elapsed * 1000),
+                }
+            ],
         )
+
+    def _reasoning_only_result(self, state: _RunState) -> AgentResult:
+        """预算耗尽后的收尾：让模型基于已有观察做一次无工具总结。"""
+        reply = self._finalize_without_tools(
+            state.provider,
+            state.messages,
+            state.tool_call_log,
+            state.proposed_schedules,
+            state.usage,
+        )
+        return self._result(state, reply)
+
+    def _result(
+        self,
+        state: _RunState,
+        reply: str,
+        *,
+        confirmation: Optional[ConfirmationInfo] = None,
+        workflow_steps: Optional[List[dict]] = None,
+    ) -> AgentResult:
+        """统一构造返回值。
+
+        六个出口原本各拼一遍字段，任一出口漏掉 selected_skill 都会让界面
+        退回"通用模式"、漏掉 applied_changes 就会把已生效的改动当成没发生。
+        """
         return AgentResult(
             reply=reply,
-            session_id=session_id,
-            tool_calls=tool_call_log,
-            applied_changes=applied_changes,
-            proposed_schedules=proposed_schedules,
-            model_usage=model_usage,
-            selected_skill=selected_skill.name if selected_skill is not None else None,
-            skill_source=skill_source,
+            session_id=state.session_id,
+            tool_calls=state.tool_call_log,
+            applied_changes=state.applied_changes,
+            proposed_schedules=state.proposed_schedules,
+            model_usage=state.usage,
+            selected_skill=(
+                state.selected_skill.name if state.selected_skill is not None else None
+            ),
+            skill_source=state.skill_source,
+            confirmation=confirmation or ConfirmationInfo(),
+            workflow_steps=workflow_steps or [],
+        )
+
+    # ------------------------------------------------------------------
+    # 模型调用与降级
+    # ------------------------------------------------------------------
+
+    def _call_model(self, state: _RunState):
+        """调用当前可用的 provider，失败时降级到本地规则模式。
+
+        三类失败走不同的熔断策略（鉴权失败永久禁用、限流与瞬时错误退避），
+        但都要给模型留一条"为什么突然变成规则模式"的 system 消息——否则它
+        会把降级后的行为当成正常上下文，继续照原计划解释。
+        """
+        provider = self._pick_provider()
+        state.provider = provider
+        tool_schemas = self._available_tool_schemas(
+            state.saturated_tools, state.active_tool_names
+        )
+        try:
+            self.last_run_provider = provider.__class__.__name__
+            response = provider.chat(state.messages, tools=tool_schemas)
+            if provider is self.llm:
+                self._record_success()
+            return response
+        except LLMAuthError as exc:
+            logger.warning("LLM authentication failed: %s", exc)
+            self._mark_auth_failed(exc)
+            return self._fallback_response(
+                state, f"真实模型鉴权失败,已永久切换到本地规则模式。错误摘要:{exc}"
+            )
+        except (LLMRateLimitError, LLMTransientError) as exc:
+            kind = "rate_limit" if isinstance(exc, LLMRateLimitError) else "transient"
+            logger.warning("LLM %s, using fallback: %s", kind, exc)
+            self._mark_failure(kind, exc)
+            return self._fallback_response(
+                state, f"真实模型暂时不可用，已切换到本地规则模式。错误摘要：{exc}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Unexpected LLM error, using fallback")
+            self._mark_failure("transient", exc)
+            return self._fallback_response(
+                state, f"真实模型暂时不可用，已切换到本地规则模式。错误摘要：{exc}"
+            )
+
+    def _fallback_response(self, state: _RunState, notice: str):
+        """降级到本地规则 provider，并把降级原因写进上下文。"""
+        self.last_run_provider = self.fallback_provider.__class__.__name__
+        state.messages.append({"role": "system", "content": notice})
+        return self.fallback_provider.chat(
+            state.messages,
+            tools=self._available_tool_schemas(
+                state.saturated_tools, state.active_tool_names
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # 工具调用处理
+    # ------------------------------------------------------------------
+
+    def _handle_tool_calls(
+        self, state: _RunState, calls: List[dict]
+    ) -> Optional[AgentResult]:
+        """处理同一轮里的全部工具调用。
+
+        返回非 None 表示这次请求要就此结束：参数解析连续失败，或者攒够了
+        待确认的变更需要用户拍板。
+        """
+        pending = _PendingConfirm()
+        for call in calls:
+            stop = self._handle_tool_call(state, call, pending)
+            if stop is not None:
+                return stop
+        if not pending.calls:
+            return None
+        return self._confirmation_result(state, pending)
+
+    def _handle_tool_call(
+        self, state: _RunState, call, pending: _PendingConfirm
+    ) -> Optional[AgentResult]:
+        """处理单个工具调用：校验参数、限次、预览或执行。"""
+        tool = self.registry.get(call.name)
+        call_key = self._call_key(call.name, call.arguments)
+
+        # 参数不是合法 JSON 对象：不执行工具，把解析说明当作 Observation。
+        # 必须与"字段缺失"分开——退化成空字典会让模型以为只是漏填，
+        # 于是反复补字段而不去修语法；参数全可选的工具还会静默执行成宽松查询。
+        if call.parse_error:
+            return self._on_parse_error(state, call)
+
+        if tool is None:
+            state.messages.append(
+                self._tool_message(call.id, call.name, False, f"未知工具：{call.name}")
+            )
+            state.tool_call_log.append(
+                {
+                    "stage": "执行",
+                    "name": call.name,
+                    "success": False,
+                    "summary": f"未知工具：{call.name}",
+                    "duration_ms": 0,
+                }
+            )
+            return None
+
+        # 场景切换：不占普通工具预算（那是业务执行预算），但单独限次。
+        if call.name == self.SKILL_SWITCH_TOOL:
+            self._handle_skill_switch(state, call)
+            return None
+
+        if call_key in state.seen_calls:
+            state.saturated_tools.add(call.name)
+            self._reject_call(
+                state, call, "同一工具参数已经执行过，请根据已有结果直接作答"
+            )
+            return None
+        state.seen_calls.add(call_key)
+
+        if not self._consume_tool_budget(state, call):
+            return None
+
+        # confirm 级别：收集同一轮的全部变更，稍后合并成一次确认。
+        if tool.confirmation == "confirm":
+            self._handle_confirm_preview(state, call, pending)
+            return None
+
+        self._execute_tool_call(state, call, tool)
+        return None
+
+    def _on_parse_error(self, state: _RunState, call) -> Optional[AgentResult]:
+        """参数不是合法 JSON：不执行，只回一条语法说明。
+
+        连续坏 JSON 说明模型在这套协议上不稳定，再重试大概率还是错，直接转
+        无工具总结，别把预算耗在语法上。返回非 None 表示就此结束。
+        """
+        state.argument_parse_errors += 1
+        state.tool_call_count += 1
+        state.messages.append(
+            self._tool_message(call.id, call.name, False, error=call.parse_error)
+        )
+        state.tool_call_log.append(
+            {
+                "stage": "理解",
+                "name": call.name,
+                "arguments": call.arguments,
+                "success": False,
+                "summary": call.parse_error,
+                "duration_ms": 0,
+                "argument_error": True,
+            }
+        )
+        if state.argument_parse_errors < self.MAX_ARGUMENT_PARSE_ERRORS:
+            return None
+        return self._reasoning_only_result(state)
+
+    def _reject_call(self, state: _RunState, call, reason: str) -> None:
+        """拒绝一次调用：回 tool 消息并标记为受限，模型据此改用已有结果。"""
+        state.messages.append(self._tool_message(call.id, call.name, False, error=reason))
+        state.tool_call_log.append(
+            {
+                "stage": self._tool_stage(call.name),
+                "name": call.name,
+                "arguments": call.arguments,
+                "success": False,
+                "limited": True,
+                "summary": reason,
+                "duration_ms": 0,
+            }
+        )
+
+    def _consume_tool_budget(self, state: _RunState, call) -> bool:
+        """计入一次调用次数；已达上限时拒绝并返回 False。
+
+        反向信号也在这里发：本轮用满即把工具名加进 saturated_tools，
+        下一轮就不再把它放进 tools 数组——模型看不见它，比反复拒绝更省 token。
+        """
+        limit = self.TOOL_CALL_LIMITS.get(call.name)
+        used = state.tool_call_counts.get(call.name, 0)
+        if limit is not None and used >= limit:
+            state.saturated_tools.add(call.name)
+            self._reject_call(
+                state,
+                call,
+                f"{call.name} 已达到本轮 {limit} 次调用上限；请使用已有结果完成回答",
+            )
+            return False
+        state.tool_call_counts[call.name] = used + 1
+        if limit is not None and used + 1 >= limit:
+            state.saturated_tools.add(call.name)
+        return True
+
+    def _execute_tool_call(self, state: _RunState, call, tool) -> None:
+        """执行工具、记录轨迹、把 observation 回给模型。"""
+        execute_started = time.perf_counter()
+        result = self.registry.execute(call.name, call.arguments, state.db)
+        execute_duration = int((time.perf_counter() - execute_started) * 1000)
+        state.tool_call_count += 1
+
+        state.tool_call_log.append(
+            {
+                "stage": self._tool_stage(call.name),
+                "name": call.name,
+                "arguments": call.arguments,
+                "success": result.success,
+                "summary": result.summary,
+                "duration_ms": execute_duration,
+            }
+        )
+
+        if result.success and tool.confirmation != "none":
+            state.applied_changes.append(
+                {"name": call.name, "summary": result.summary, "data": result.data}
+            )
+            if (
+                call.name in ("generate_plan", "replan")
+                and isinstance(result.data, dict)
+                and isinstance(result.data.get("schedules"), list)
+            ):
+                state.proposed_schedules = result.data["schedules"]
+
+        state.messages.append(
+            self._tool_message(
+                call.id,
+                call.name,
+                result.success,
+                result.summary,
+                result.data,
+                result.error,
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # 场景切换
+    # ------------------------------------------------------------------
+
+    def _handle_skill_switch(self, state: _RunState, call) -> None:
+        """处理场景切换：不占业务工具预算，但单独限次。
+
+        每个分支都必须先回 tool 消息（OpenAI 协议要求 observation 紧跟
+        tool_calls），成功时再追加新场景的指引。
+        """
+        state.skill_switch_count += 1
+        if state.skill_switch_count > self.MAX_SKILL_SWITCHES:
+            error = (
+                f"本轮场景切换已达 {self.MAX_SKILL_SWITCHES} 次上限，"
+                "请基于当前场景直接作答"
+            )
+            state.messages.append(self._tool_message(call.id, call.name, False, error=error))
+            state.tool_call_log.append(
+                {
+                    "stage": "理解",
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "success": False,
+                    "limited": True,
+                    "summary": error,
+                    "duration_ms": 0,
+                }
+            )
+            return
+
+        result = self.registry.execute(call.name, call.arguments, state.db)
+        target = self._resolve_skill(result)
+
+        if target is None:
+            reason = result.error or "场景切换失败"
+            state.messages.append(
+                self._tool_message(call.id, call.name, False, result.summary, None, reason)
+            )
+            self._log_skill_switch(state, call, success=False, summary=reason)
+            return
+
+        if state.selected_skill is not None and target.name == state.selected_skill.name:
+            already = f"当前已在「{target.description}」场景，无需重复切换"
+            state.messages.append(
+                self._tool_message(call.id, call.name, True, already, {"name": target.name})
+            )
+            self._log_skill_switch(state, call, success=True, summary=already)
+            return
+
+        state.selected_skill = target
+        state.skill_source = "model"
+        state.active_tool_names = (
+            set(target.allowed_tools) if target.allowed_tools is not None else None
+        )
+        state.messages.append(
+            self._tool_message(call.id, call.name, True, result.summary, result.data)
+        )
+        state.messages.append(
+            {"role": "system", "content": self._skill_hint_message(target)}
+        )
+        self._log_skill_switch(state, call, success=True, summary=result.summary)
+
+    def _log_skill_switch(self, state: _RunState, call, *, success: bool, summary) -> None:
+        state.tool_call_log.append(
+            {
+                "stage": "理解",
+                "name": call.name,
+                "arguments": call.arguments,
+                "success": success,
+                "summary": summary,
+                "duration_ms": 0,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 待确认变更
+    # ------------------------------------------------------------------
+
+    def _handle_confirm_preview(
+        self, state: _RunState, call, pending: _PendingConfirm
+    ) -> None:
+        """confirm 级工具：只生成预览，把变更攒进 pending 等合并确认。
+
+        不占 ``tool_call_count``——那是"已执行"的预算，预览还没动数据。
+        """
+        preview_started = time.perf_counter()
+        preview = self.registry.preview(call.name, call.arguments, state.db)
+        preview_duration = int((time.perf_counter() - preview_started) * 1000)
+
+        if not preview.success:
+            state.messages.append(
+                self._tool_message(
+                    call.id, call.name, False, error=preview.error or "无法生成操作预览"
+                )
+            )
+            state.tool_call_log.append(
+                {
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "success": False,
+                    "summary": preview.error,
+                    "duration_ms": preview_duration,
+                }
+            )
+            return
+
+        pending.calls.append({"name": call.name, "args": call.arguments})
+        # 记下 id：这轮结束后 messages 里不会有它的 observation，
+        # 轨迹采集需要据此把它标成"等确认"而不是"被中断"。
+        state.holder.setdefault("awaiting_ids", set()).add(call.id)
+        pending.summaries.append(preview.summary or f"即将执行 {call.name}")
+        if preview.data is not None:
+            pending.previews.append(preview.data)
+        state.tool_call_log.append(
+            {
+                "stage": self._tool_stage(call.name),
+                "name": call.name,
+                "arguments": call.arguments,
+                "success": True,
+                "summary": preview.summary,
+                "duration_ms": preview_duration,
+                "awaiting_confirmation": True,
+            }
+        )
+
+    def _confirmation_result(
+        self, state: _RunState, pending: _PendingConfirm
+    ) -> AgentResult:
+        """把本轮攒下的变更合并成一次确认请求。
+
+        多个变更合成一个 action_id：用户点一次确认就走完，避免逐个弹窗，
+        也让补偿事务有一个明确的原子边界。
+        """
+        if len(pending.summaries) == 1:
+            summary = pending.summaries[0]
+        else:
+            summary = (
+                f"将执行 {len(pending.summaries)} 项操作：" + "；".join(pending.summaries)
+            )
+        combined_preview = (
+            pending.previews[0]
+            if len(pending.previews) == 1
+            else {"items": pending.previews}
+        )
+        action_id = self.confirmation_store.create(
+            db=state.db,
+            tool_calls=pending.calls,
+            summary=summary,
+            preview=combined_preview,
+            session_id=state.session_id,
+        )
+        return self._result(
+            state,
+            f"需要你确认：{summary}",
+            confirmation=ConfirmationInfo(
+                required=True,
+                action_id=action_id,
+                summary=summary,
+                changes=[
+                    {"name": item["name"], "arguments": item["args"]}
+                    for item in pending.calls
+                ],
+                preview=combined_preview,
+            ),
         )
 
     def replace_provider(self, provider: LLMProvider) -> None:
