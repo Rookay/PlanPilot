@@ -134,7 +134,7 @@
 - **生态**：MCP Server 的官方 registry、社区 server（filesystem / git / postgres / fetch）
 
 **和你的项目怎么接**（这个答案会加分）：
-> "我的 36 个工具是进程内 Python 函数，套 MCP 会引入 JSON-RPC 往返，反而更慢。MCP 真正适合我的是 `app/integrations/` 这一层——把高德、Open-Meteo 这类外部服务做成 MCP Server，或者未来接公司内部 API。**核心链路自研 + 外部能力走标准协议**，这是我认为的合理分层。"
+> "我的 37 个工具是进程内 Python 函数，套 MCP 会引入 JSON-RPC 往返，反而更慢。MCP 真正适合我的是 `app/integrations/` 这一层——把高德、Open-Meteo 这类外部服务做成 MCP Server，或者未来接公司内部 API。**核心链路自研 + 外部能力走标准协议**，这是我认为的合理分层。"
 
 **资源**：
 - modelcontextprotocol.io 官方文档（很短）
