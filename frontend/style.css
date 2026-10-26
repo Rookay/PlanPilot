@@ -1067,6 +1067,107 @@ body {
 
 /* 对话助手 */
 
+/* 历史会话条：横向滚动，不做成抽屉——抽屉要改页面为左右布局，
+   现有纵向结构会被牵动，而会话切换本身不需要那么重的交互。 */
+
+.session-bar {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 18px;
+}
+
+.session-bar-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.session-bar-label {
+    font-size: 13px;
+    color: #666;
+}
+
+.session-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+}
+
+.session-empty {
+    font-size: 13px;
+    color: #999;
+}
+
+.session-chip {
+    position: relative;
+    flex: 0 0 auto;
+    max-width: 220px;
+    padding: 8px 30px 8px 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: #fafafa;
+    cursor: pointer;
+}
+
+.session-chip:hover {
+    background: #f2f2f2;
+}
+
+.session-chip.active {
+    border-color: #222;
+    background: #fff;
+}
+
+.session-chip.active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 6px;
+    bottom: 6px;
+    width: 3px;
+    border-radius: 2px;
+    background: #222;
+}
+
+.session-chip-title {
+    display: block;
+    max-width: 170px;
+    font-size: 13px;
+    color: #222;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.session-chip-meta {
+    display: block;
+    margin-top: 3px;
+    font-size: 11px;
+    color: #888;
+    white-space: nowrap;
+}
+
+.session-chip-delete {
+    position: absolute;
+    top: 5px;
+    right: 7px;
+    padding: 1px 3px;
+    font-size: 15px;
+    line-height: 1;
+    color: #bbb;
+    border-radius: 4px;
+}
+
+.session-chip-delete:hover {
+    background: #f7dede;
+    color: #c0392b;
+}
+
 .chat-messages {
     display: flex;
     flex-direction: column;

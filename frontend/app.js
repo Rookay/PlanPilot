@@ -38,6 +38,8 @@ const state = {
   chatLoading: false,
   chatSessionId: null,
   chatPendingConfirmation: null,
+  sessions: [],
+  sessionsLoaded: false,
   preferences: null,
   locations: [],
   modalLocationCandidates: { task: [], event: [], eventOrigin: [] },
@@ -304,7 +306,12 @@ function showPage(pageName) {
   } else if (pageName === "itinerary") {
     loadItinerary().catch(handleError);
   } else if (pageName === "chat") {
-    Promise.all([loadChatHistory(), loadAgentStatus(), loadAgentRuns()]).catch(handleError);
+    Promise.all([
+      loadChatHistory(),
+      loadAgentStatus(),
+      loadAgentRuns(),
+      loadSessions(),
+    ]).catch(handleError);
   } else if (pageName === "evaluations") {
     loadEvaluation().catch(handleError);
   } else if (pageName === "settings") {
@@ -3762,6 +3769,8 @@ async function sendChatMessage() {
     }
     await loadAgentStatus();
     await loadAgentRuns().catch(handleError);
+    // 消息数和标题都变了，列表要跟着更新（新会话第一次说话后才会出现在列表里）。
+    await loadSessions().catch(handleError);
   } catch (error) {
     state.chatMessages.push({
       role: "assistant",
@@ -3823,9 +3832,142 @@ async function clearChat() {
     state.agentRuns = [];
     $("agentTrace")?.classList.add("hidden");
     renderChatMessages();
+    await loadSessions().catch(handleError);
   } catch (error) {
     alert(`清空失败：${error.message}`);
   }
+}
+
+
+/* =========================
+   历史会话
+========================= */
+
+// 前端原本只认 localStorage 里那一个 session_id，既没有列表也没有切换入口，
+// 换 origin（localhost 与 127.0.0.1 算两个）、清缓存或换浏览器就会生成新 id，
+// 看起来像"历史记录丢了"。数据一直都在库里，缺的只是这个入口。
+
+async function loadSessions() {
+  try {
+    state.sessions = await api("/agent/sessions?limit=50");
+  } catch (error) {
+    // 列表挂了不该连累聊天本身，静默降级成空列表。
+    state.sessions = [];
+  }
+  state.sessionsLoaded = true;
+  renderSessionList();
+}
+
+function renderSessionList() {
+  const container = $("sessionList");
+  if (!container) {
+    return;
+  }
+  container.textContent = "";
+
+  if (!state.sessions.length) {
+    const empty = document.createElement("span");
+    empty.className = "session-empty";
+    empty.textContent = "还没有历史会话";
+    container.appendChild(empty);
+    return;
+  }
+
+  state.sessions.forEach((item) => {
+    const chip = document.createElement("div");
+    const isActive = item.session_id === state.chatSessionId;
+    chip.className = isActive ? "session-chip active" : "session-chip";
+    chip.setAttribute("role", "button");
+    chip.tabIndex = 0;
+    chip.title = item.preview || item.title;
+    chip.addEventListener("click", () => switchSession(item.session_id));
+    chip.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        switchSession(item.session_id);
+      }
+    });
+
+    const title = document.createElement("span");
+    title.className = "session-chip-title";
+    title.textContent = item.title || item.session_id;
+
+    const meta = document.createElement("span");
+    meta.className = "session-chip-meta";
+    meta.textContent = `${item.message_count} 条 · ${formatDateTime(item.last_message_at)}`;
+
+    const remove = document.createElement("span");
+    remove.className = "session-chip-delete";
+    remove.textContent = "×";
+    remove.title = "删除这个会话";
+    remove.addEventListener("click", (event) => {
+      // 不拦住就会冒泡到 chip，变成"删完顺手切过去"。
+      event.stopPropagation();
+      deleteSession(item.session_id);
+    });
+
+    chip.append(title, meta, remove);
+    container.appendChild(chip);
+  });
+}
+
+async function switchSession(sessionId) {
+  if (sessionId === state.chatSessionId) {
+    return;
+  }
+  state.chatSessionId = sessionId;
+  localStorage.setItem("planpilot_session_id", sessionId);
+  state.chatMessages = [];
+  state.chatLoaded = false;
+  state.chatPendingConfirmation = null;
+  state.agentRuns = [];
+  $("agentTrace")?.classList.add("hidden");
+  renderSessionList();
+
+  try {
+    await Promise.all([loadChatHistory(), loadAgentRuns()]);
+  } catch (error) {
+    handleError(error);
+  }
+}
+
+async function deleteSession(sessionId) {
+  const target = state.sessions.find((item) => item.session_id === sessionId);
+  const label = target ? target.title : sessionId;
+  if (
+    !confirm(
+      `确定删除会话「${label}」吗？消息、运行记录和摘要会一起删掉，无法恢复。`
+    )
+  ) {
+    return;
+  }
+
+  try {
+    await api(`/agent/sessions/${sessionId}`, { method: "DELETE" });
+    if (sessionId === state.chatSessionId) {
+      startNewSession();
+    }
+    await loadSessions();
+  } catch (error) {
+    alert(`删除失败：${error.message}`);
+  }
+}
+
+function startNewSession() {
+  const newId =
+    window.crypto && crypto.randomUUID
+      ? crypto.randomUUID().replace(/-/g, "")
+      : `session_${Date.now()}`;
+  state.chatSessionId = newId;
+  localStorage.setItem("planpilot_session_id", newId);
+  state.chatMessages = [];
+  // 新会话必然是空的，没必要为它多打一次接口。
+  state.chatLoaded = true;
+  state.chatPendingConfirmation = null;
+  state.agentRuns = [];
+  $("agentTrace")?.classList.add("hidden");
+  renderChatMessages();
+  renderSessionList();
 }
 
 
