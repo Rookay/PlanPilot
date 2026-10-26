@@ -1,0 +1,15 @@
+# 仓库内换行符统一策略。
+# 本机 core.autocrlf=true 会把检出内容转成 CRLF，而 Makefile 的 recipe
+# 一旦带 CRLF，在 Linux/CI 上会报 "missing separator"，导致 make 整段失效。
+* text=auto
+
+.gitattributes  text eol=lf
+Makefile        text eol=lf
+*.sh            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+requirements*   text eol=lf
+
+*.png           binary
+*.jpg           binary
+*.db            binary
