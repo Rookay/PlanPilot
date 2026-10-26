@@ -123,6 +123,77 @@ class PreviewSchemaTests(TestCase):
         self.assertTrue(result.needs_confirmation)
 
 
+class ToolSchemaInvariantTests(TestCase):
+    """整张表的一致性不变量，而不是逐个工具补漏。
+
+    ``select_skill`` 曾是 37 个工具里唯一漏了 ``additionalProperties`` 的：
+    其余 36 个都会拦下拼错的字段名，它不会。单点修掉容易，但下次加工具还会漏，
+    所以这里对全部 schema 做断言。
+    """
+
+    def setUp(self):
+        self.schemas = build_default_registry().schemas()
+
+    def test_registry_is_not_empty(self):
+        self.assertGreater(len(self.schemas), 30)
+
+    def test_every_schema_rejects_unknown_parameters(self):
+        offenders = [
+            schema["function"]["name"]
+            for schema in self.schemas
+            if schema["function"]["parameters"].get("additionalProperties") is not False
+        ]
+        self.assertEqual(offenders, [], f"这些工具没声明 additionalProperties: false：{offenders}")
+
+    def test_every_property_has_a_type(self):
+        """每个参数都要有 type，否则校验器拿不到类型信息。
+
+        注意这里**不**要求 description：目前 37 个工具里还有约 100 个参数没写
+        参数级说明（``update_task`` 18 个最多）。那是已知债，补起来是另一件事，
+        不该由一个"形状校验"的测试来拦——它会把无关改动挡在门外。
+        """
+
+        problems = []
+        for schema in self.schemas:
+            function = schema["function"]
+            parameters = function["parameters"]
+            self.assertEqual(parameters.get("type"), "object", function["name"])
+            for prop, spec in parameters.get("properties", {}).items():
+                # $ref / anyOf 这类本身就是合法写法（例如坐标复用一个 $defs）
+                if {"type", "$ref", "anyOf", "oneOf", "allOf"} & set(spec):
+                    continue
+                problems.append(f"{function['name']}.{prop} 缺 type")
+        self.assertEqual(problems, [])
+
+    def test_required_fields_are_declared_in_properties(self):
+        problems = []
+        for schema in self.schemas:
+            function = schema["function"]
+            parameters = function["parameters"]
+            properties = parameters.get("properties", {})
+            for field in parameters.get("required", []):
+                if field not in properties:
+                    problems.append(f"{function['name']}.{field} 出现在 required 但未声明")
+        self.assertEqual(problems, [])
+
+    def test_schema_descriptions_do_not_promise_contradictory_behaviour(self):
+        """``select_skill`` 曾写着"留空可列出全部场景"，而它自己 required + enum。
+
+        模型信了描述去传空串，只会被校验层打回来，白烧一轮。
+        """
+
+        for schema in self.schemas:
+            function = schema["function"]
+            parameters = function["parameters"]
+            description = parameters.get("properties", {}).get("name", {}).get("description", "")
+            if "留空" in description:
+                self.assertNotIn(
+                    "name",
+                    parameters.get("required", []),
+                    f"{function['name']}.name 说明可以留空，却又被声明为必填",
+                )
+
+
 class _BrokenSchemaTool(Tool):
     name = "broken_schema_tool"
     description = "schema 本身写错时不能把整个请求带崩"

@@ -51,7 +51,7 @@ class SelectSkillTool(Tool):
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "目标场景标识；留空可列出全部可选场景",
+                    "description": "目标场景标识，必须是可选场景之一",
                 },
                 "reason": {
                     "type": "string",
@@ -59,6 +59,8 @@ class SelectSkillTool(Tool):
                 },
             },
             "required": ["name"],
+            # 和其余 36 个工具保持一致：拼错的字段名要报错，而不是被 **kwargs 吃掉。
+            "additionalProperties": False,
         }
         if names:
             schema["properties"]["name"]["enum"] = names
@@ -74,15 +76,12 @@ class SelectSkillTool(Tool):
 
         requested = str(kwargs.get("name") or "").strip()
         if not requested:
+            # schema 里 name 是必填 + enum，正常路径到不了这里；留一条明确的
+            # 报错而不是"留空即列出全部"——后者与 schema 自相矛盾，模型信了
+            # 描述去传空串，只会被校验层打回来。
             return ToolResult(
-                success=True,
-                summary="可用场景：" + "、".join(registry.names()),
-                data={
-                    "skills": [
-                        {"name": item.name, "description": item.description}
-                        for item in registry.all()
-                    ]
-                },
+                success=False,
+                error="缺少场景名；可选场景：" + "、".join(registry.names()),
             )
 
         skill = registry.get(requested)
@@ -95,7 +94,7 @@ class SelectSkillTool(Tool):
                 ),
             )
 
-        # system_hint 不放进 data：工具结果会被 _compact_tool_payload 压缩，
+        # system_hint 不放进 data：工具结果会被 compact_payload 压缩，
         # 超长提示词可能被截断。Loop 侧按 name 从注册表取完整定义。
         return ToolResult(
             success=True,
