@@ -3,8 +3,9 @@
 # File    ：factory.py
 """构建并持有全局单例 Agent。
 
-Memory 与 PendingActionStore 是内存态，必须跨请求共享，
-因此这里用一个模块级单例供 API 层复用。
+PendingActionStore 是内存态（待确认操作只活到用户点确认或进程结束），必须
+跨请求共享，所以这里用一个模块级单例供 API 层复用。会话历史不是内存态——
+它每次请求都从 chat_messages 表里读，见 app.services.chat_service。
 """
 
 from app import config
@@ -62,5 +63,5 @@ def reconnect_agent() -> dict:
     }
 
 
-#: 全局单例（内存态会话与确认集跨请求共享）。
+#: 全局单例（确认集与 LLM 状态跨请求共享）。
 agent = build_agent()

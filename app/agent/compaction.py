@@ -10,8 +10,10 @@
    在中文上收紧，两头都不准。
 2. **按信息密度取舍，不按位置。** 首尾截断会把任务清单的中间整段丢掉，而排期恰恰
    依赖中间那些条目。这里给每一段打分，约束词、时间、ID、数字加分，再贪心填充。
-3. **压缩必须留痕。** 丢掉的内容要给出数量和提示，让模型知道有缺口、可以重新查询，
-   而不是以为眼前看到的就是全部。
+   首尾段有位置加成（通常是背景与结论），但加成不是豁免——预算真不够时一样会被丢。
+3. **压缩必须留痕，且不能把结构压坏。** 丢掉的内容要给出数量和提示，让模型知道
+   有缺口、可以重新查询；结构化内容（JSON）压缩后必须仍然是**合法 JSON**。把
+   一条工具结果压成解析不了的半截文本，比不压更糟——模型连"少了什么"都判断不出来。
 """
 
 import json
@@ -46,6 +48,11 @@ _TIME_RE = re.compile(
 _ID_RE = re.compile(r"#\d+|\bid[=:\s]|\bID\b")
 _DIGIT_RE = re.compile(r"\d")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？；!?;])")
+#: 硬截断时允许把切点回退到的位置，避免拦腰切断一句话。
+_BREAK_CHARS = set("。！？；，、：,.!?;:\n）】」』》")
+
+#: 首段 / 尾段的位置加成。与约束词同量级，够它优先被保留，但不足以豁免预算。
+_EDGE_BONUS = 3
 
 #: 列表类字段的保留策略：头部条数 / 尾部条数。
 _LIST_HEAD = 12
@@ -57,6 +64,18 @@ _MESSAGE_OVERHEAD_TOKENS = 4
 #: 单个字符串字段超过这个字符数就做语义压缩。
 _LONG_STRING_CHARS = 1200
 _LONG_STRING_TOKENS = 350
+#: 预留给省略占位的最小段预算，防止预算极小时逐段试探到负数。
+_MIN_SEGMENT_BUDGET = 24
+#: JSON 逐级收紧的档位：(列表头, 列表尾, 长字符串 token 上限)。
+#: 从"保留结构原貌"一路收到"只剩骨架"，每一档都还是一个完整对象。
+_JSON_SHRINK_STEPS = (
+    (_LIST_HEAD, _LIST_TAIL, _LONG_STRING_TOKENS),
+    (8, 3, 200),
+    (4, 2, 120),
+    (2, 1, 60),
+    (1, 1, 40),
+    (0, 0, 20),
+)
 
 
 def _is_cjk(char: str) -> bool:
@@ -98,12 +117,9 @@ def estimate_messages_tokens(messages: List[dict]) -> int:
     return sum(estimate_message_tokens(message) for message in messages)
 
 
-def _split_segments(text: str) -> List[str]:
-    """按行切；只有一行时退化为按句切。"""
-
-    if "\n" in text:
-        return text.split("\n")
-    return [segment for segment in _SENTENCE_SPLIT_RE.split(text) if segment]
+# ---------------------------------------------------------------------------
+# 纯文本：切句 + 打分取舍
+# ---------------------------------------------------------------------------
 
 
 def _score_segment(segment: str) -> int:
@@ -128,29 +144,29 @@ def _score_segment(segment: str) -> int:
     return score
 
 
-def _truncate_middle(text: str, max_tokens: int, marker: str) -> str:
-    """无结构文本的兜底：保头保尾，用二分找能塞进去的最大长度。"""
+def _segment_score(segments: List[str], index: int) -> int:
+    """信息密度 + 位置加成。
 
-    cut = f"...[{marker}]..."
-    if estimate_tokens(cut) >= max_tokens:
-        return cut
+    入选和剔除必须用同一个口径，否则会出现"靠加成入选、剔除时按裸分被提前
+    丢掉"的自相矛盾。
+    """
 
-    best = cut
-    low, high = 0, len(text)
-    while low <= high:
-        middle = (low + high) // 2
-        tail = text[-min(middle // 4, 400):] if middle else ""
-        candidate = text[:middle] + cut + tail
-        if estimate_tokens(candidate) <= max_tokens:
-            best = candidate
-            low = middle + 1
-        else:
-            high = middle - 1
-    return best
+    score = _score_segment(segments[index])
+    if index == 0 or index == len(segments) - 1:
+        score += _EDGE_BONUS
+    return score
 
 
-def _assemble(segments: List[str], keep: set, marker: str, joiner: str) -> str:
-    """按原顺序拼接保留段，跳过的连续段落折成一条省略标记。"""
+def _split_text(text: str) -> Tuple[List[str], str]:
+    """按行切；只有一行时退化为按句切。返回 ``(段列表, 连接符)``。"""
+
+    if "\n" in text:
+        return text.split("\n"), "\n"
+    return [segment for segment in _SENTENCE_SPLIT_RE.split(text) if segment], ""
+
+
+def _assemble(segments: List[str], keep: set, joiner: str, marker: str) -> str:
+    """按原顺序拼接保留段，连续的被跳过段落折成一条省略标记。"""
 
     pieces: List[str] = []
     skipped = 0
@@ -167,11 +183,139 @@ def _assemble(segments: List[str], keep: set, marker: str, joiner: str) -> str:
     return joiner.join(pieces)
 
 
-def compress_text(text: str, max_tokens: int, marker: str = "较长历史内容已压缩") -> str:
-    """把文本压到 ``max_tokens`` 以内，按信息密度而不是位置取舍。
+def _align_cut(text: str, cut: int, window: int = 30) -> int:
+    """把切点往前挪到最近的标点之后，别把一句话从中间劈开。"""
 
-    贪心填充之后必须复核总量，因为省略标记本身占 token。复核不通过时**丢掉分数
-    最低的中间段再重排**，而不是回头做首尾截断——后者会把刚保住的关键句拦腰切断。
+    if cut <= 0:
+        return 0
+    start = max(0, cut - window)
+    for offset in range(cut - 1, start - 1, -1):
+        if text[offset] in _BREAK_CHARS:
+            return offset + 1
+    return cut
+
+
+def _truncate_middle(text: str, max_tokens: int, marker: str) -> str:
+    """无结构文本的兜底：保头保尾，用二分找能塞进去的最大长度。
+
+    切点对齐到标点边界；对齐会让长度变得不完全单调，所以每一轮同时试原始
+    切点和对齐后的切点，取能过预算的更长者。
+    """
+
+    cut = f"...[{marker}]..."
+    if estimate_tokens(cut) >= max_tokens:
+        return cut
+
+    def candidate(head_len: int) -> str:
+        tail = text[-min(head_len // 4, 400):] if head_len else ""
+        return text[:head_len] + cut + tail
+
+    best = cut
+    low, high = 0, len(text)
+    while low <= high:
+        middle = (low + high) // 2
+        accepted: Optional[Tuple[int, str]] = None
+        for head_len in (middle, _align_cut(text, middle)):
+            candidate_text = candidate(head_len)
+            if estimate_tokens(candidate_text) <= max_tokens:
+                if accepted is None or head_len > accepted[0]:
+                    accepted = (head_len, candidate_text)
+        if accepted is not None:
+            best = accepted[1]
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def _compress_free_text(text: str, max_tokens: int, marker: str) -> str:
+    """自由文本路径：切段 → 打分 → 贪心填充 → 复核。"""
+
+    segments, joiner = _split_text(text)
+    if len(segments) <= 2:
+        return _truncate_middle(text, max_tokens, marker)
+
+    # 只预留一处占位：省略段连续时本来也只会生成一个标记。按最坏情况预留
+    # （头尾各一个长标记）会把大半预算吃掉，那是上一版的实测问题。
+    reserve = estimate_tokens(f"...[99 段{marker}]...")
+    segment_budget = max(_MIN_SEGMENT_BUDGET, max_tokens - reserve)
+
+    costs = [estimate_tokens(segment) for segment in segments]
+    keep: set = set()
+    used = 0
+    order = sorted(
+        range(len(segments)),
+        key=lambda index: (-_segment_score(segments, index), index),
+    )
+    for index in order:
+        if used + costs[index] <= segment_budget:
+            keep.add(index)
+            used += costs[index]
+
+    result = _assemble(segments, keep, joiner, marker)
+    while estimate_tokens(result) > max_tokens and keep:
+        # 分数最低的先丢；同分时丢更靠后的，保留前文的叙述顺序。
+        victim = min(keep, key=lambda index: (_segment_score(segments, index), -index))
+        keep.discard(victim)
+        result = _assemble(segments, keep, joiner, marker)
+
+    if estimate_tokens(result) > max_tokens:
+        return _truncate_middle(result, max_tokens, marker)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 结构化内容：交给 compact_payload 逐级收紧
+# ---------------------------------------------------------------------------
+
+
+def _shrink_json_text(text: str, max_tokens: int) -> Optional[str]:
+    """把单行 JSON 压到预算内，保持可解析。不是 JSON 时返回 ``None``。
+
+    文本级切段在 JSON 上行不通：外层往往只有三五个 key，其中承载数据的那一个
+    体积最大，按"段太大就跳过"的规则会被整段丢掉，剩下的是一堆无关紧要的
+    元字段。所以这里走结构化的路——逐档收紧列表保留条数和长字符串上限，
+    每一档都还能 ``json.loads``。
+    """
+
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (TypeError, ValueError):
+        return None
+
+    for head, tail, string_tokens in _JSON_SHRINK_STEPS:
+        candidate = json.dumps(
+            compact_payload(
+                payload,
+                list_head=head,
+                list_tail=tail,
+                string_tokens=string_tokens,
+            ),
+            ensure_ascii=False,
+            default=str,
+        )
+        if estimate_tokens(candidate) <= max_tokens:
+            return candidate
+    # 收紧到只剩骨架还是超预算：这已经不是"压缩"能解决的问题，交给兜底截断。
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 主入口
+# ---------------------------------------------------------------------------
+
+
+def compress_text(
+    text: str, max_tokens: int, marker: str = "较长历史内容已压缩"
+) -> str:
+    """把文本压到 ``max_tokens`` 以内。
+
+    分两条路：像 JSON 的走 :func:`_shrink_json_text`（保结构），其余走
+    :func:`_compress_free_text`（按信息密度取舍）。两者都以"压完还能被读懂"
+    为前提——省 token 不是目的，让模型在有限预算内拿到可决策的信息才是。
     """
 
     if not text or max_tokens <= 0:
@@ -179,79 +323,61 @@ def compress_text(text: str, max_tokens: int, marker: str = "较长历史内容�
     if estimate_tokens(text) <= max_tokens:
         return text
 
-    segments = _split_segments(text)
-    if len(segments) <= 2:
-        return _truncate_middle(text, max_tokens, marker)
+    if "\n" not in text:
+        structured = _shrink_json_text(text, max_tokens)
+        if structured is not None:
+            return structured
 
-    joiner = "\n" if "\n" in text else ""
-    last_index = len(segments) - 1
-
-    # 预算里先扣掉省略标记的开销，最多可能出现在头尾两处。
-    reserve = estimate_tokens(f"...[999 段{marker}]...") * 2 + 2
-    segment_budget = max(32, max_tokens - reserve)
-
-    # 首尾永远保留：开头通常交代背景，结尾通常是结论。
-    keep = {0, last_index}
-    used = estimate_tokens(segments[0]) + estimate_tokens(segments[last_index])
-
-    order = sorted(
-        range(1, last_index),
-        key=lambda index: (-_score_segment(segments[index]), index),
-    )
-    for index in order:
-        cost = estimate_tokens(segments[index])
-        if used + cost > segment_budget:
-            continue
-        keep.add(index)
-        used += cost
-
-    result = _assemble(segments, keep, marker, joiner)
-    while estimate_tokens(result) > max_tokens:
-        candidates = [index for index in keep if index not in (0, last_index)]
-        if not candidates:
-            break
-        # 分数最低的先丢；同分时丢更靠后的，保留前文的叙述顺序。
-        victim = min(candidates, key=lambda i: (_score_segment(segments[i]), -i))
-        keep.discard(victim)
-        result = _assemble(segments, keep, marker, joiner)
-
-    if estimate_tokens(result) > max_tokens:
-        return _truncate_middle(result, max_tokens, marker)
-    return result
+    return _compress_free_text(text, max_tokens, marker)
 
 
-def _compact_list(items: list, key: str, depth: int) -> Any:
+# ---------------------------------------------------------------------------
+# 工具结果瘦身
+# ---------------------------------------------------------------------------
+
+
+def _compact_list(
+    items: list,
+    key: str,
+    depth: int,
+    head: int,
+    tail: int,
+    string_tokens: int,
+) -> Any:
     if key == "path":
         # 路线几何点动辄上百个，只留起点、终点和点数。
         return {
             "point_count": len(items),
-            "start": compact_payload(items[0], depth=depth + 1) if items else None,
-            "end": compact_payload(items[-1], depth=depth + 1) if items else None,
+            "start": _compact(items[0], "", depth + 1, head, tail, string_tokens) if items else None,
+            "end": _compact(items[-1], "", depth + 1, head, tail, string_tokens) if items else None,
         }
 
     if key == "steps":
-        head_count, tail_count = _STEPS_HEAD, _STEPS_TAIL
+        # 步骤序列通常更长，收紧时也跟着缩，但保持"头重尾轻"的比例。
+        head_count, tail_count = max(1, head // 2), max(0, tail // 2)
     else:
-        head_count, tail_count = _LIST_HEAD, _LIST_TAIL
+        head_count, tail_count = head, tail
 
     if len(items) <= head_count + tail_count:
-        return [compact_payload(item, depth=depth + 1) for item in items]
+        return [_compact(item, "", depth + 1, head, tail, string_tokens) for item in items]
 
-    head = [compact_payload(item, depth=depth + 1) for item in items[:head_count]]
-    tail = [compact_payload(item, depth=depth + 1) for item in items[-tail_count:]]
+    kept_head = [
+        _compact(item, "", depth + 1, head, tail, string_tokens)
+        for item in items[:head_count]
+    ]
+    kept_tail = (
+        [
+            _compact(item, "", depth + 1, head, tail, string_tokens)
+            for item in items[-tail_count:]
+        ]
+        if tail_count
+        else []
+    )
     omitted = len(items) - head_count - tail_count
-    return head + [{"omitted_count": omitted, "note": "中间条目已省略"}] + tail
+    return kept_head + [{"omitted_count": omitted, "note": "中间条目已省略"}] + kept_tail
 
 
-def compact_payload(value: Any, key: str = "", depth: int = 0) -> Any:
-    """工具结果瘦身：只留决策相关字段，丢掉空值和超长内容。
-
-    - 递归深度超过 7 层直接截断，避免病态嵌套；
-    - ``None`` / 空串 / 空列表 / 空字典整键丢弃，这类字段占位不占信息；
-    - 列表保留头 12 + 尾 4，中间折成 ``omitted_count``；
-    - 超长字符串走 :func:`compress_text`，保留含时间与约束的句子。
-    """
-
+def _compact(value: Any, key: str, depth: int, head: int, tail: int, string_tokens: int) -> Any:
     if depth >= 7:
         return "[嵌套内容已省略]"
     if hasattr(value, "model_dump"):
@@ -262,16 +388,41 @@ def compact_payload(value: Any, key: str = "", depth: int = 0) -> Any:
         for item_key, item_value in value.items():
             if item_value is None or item_value == "" or item_value == [] or item_value == {}:
                 continue
-            compacted[item_key] = compact_payload(item_value, item_key, depth + 1)
+            compacted[item_key] = _compact(
+                item_value, item_key, depth + 1, head, tail, string_tokens
+            )
         return compacted
 
     if isinstance(value, list):
-        return _compact_list(value, key, depth)
+        return _compact_list(value, key, depth, head, tail, string_tokens)
 
     if isinstance(value, str) and len(value) > _LONG_STRING_CHARS:
-        return compress_text(value, _LONG_STRING_TOKENS, marker="内容已压缩")
+        return compress_text(value, string_tokens, marker="内容已压缩")
 
     return value
+
+
+def compact_payload(
+    value: Any,
+    key: str = "",
+    depth: int = 0,
+    *,
+    list_head: int = _LIST_HEAD,
+    list_tail: int = _LIST_TAIL,
+    string_tokens: int = _LONG_STRING_TOKENS,
+) -> Any:
+    """工具结果瘦身：只留决策相关字段，丢掉空值和超长内容。
+
+    - 递归深度超过 7 层直接截断，避免病态嵌套；
+    - ``None`` / 空串 / 空列表 / 空字典整键丢弃，这类字段占位不占信息；
+    - 列表默认保留头 12 + 尾 4，中间折成 ``omitted_count``；
+    - 超长字符串走 :func:`compress_text`，保留含时间与约束的句子。
+
+    ``list_head`` / ``list_tail`` / ``string_tokens`` 是给
+    :func:`_shrink_json_text` 用的收紧旋钮，正常调用保持默认即可。
+    """
+
+    return _compact(value, key, depth, list_head, list_tail, string_tokens)
 
 
 def degrade_tool_message(message: dict) -> Optional[dict]:

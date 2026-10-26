@@ -24,6 +24,7 @@ from app.agent.confirmation import PendingActionStore
 from app.agent.loop import AgentLoop
 from app.agent.memory import Memory
 from app.llm.mock import MockProvider
+from app.services import chat_service
 from app.tools.defaults import build_default_registry
 from tests.helpers import make_session
 
@@ -90,6 +91,108 @@ class CompressTextTests(TestCase):
 
     def test_empty_text(self):
         self.assertEqual(compress_text("", 100), "")
+
+
+class CompressStructuredTextTests(TestCase):
+    """单行 JSON 的压缩必须保住结构。
+
+    上一版对单行文本一律走"保头保尾"硬截断，压出来的 JSON 缺引号缺括号，
+    连 ``json.loads`` 都过不了；改成按顶层逗号切段后又有新问题——外层往往
+    只有三五个 key，体积最大的那个数据字段会被当成"塞不下的段"整段丢掉，
+    最后只剩 success / summary 这类元信息。这里锁住真正的行为：走结构化
+    瘦身，逐档收紧列表，输出始终可解析。
+    """
+
+    @staticmethod
+    def _payload(count: int = 30) -> str:
+        items = [
+            {
+                "id": index,
+                "title": f"任务{index}",
+                "start": f"2026-11-0{index % 9 + 1}T0{index % 9}:00:00Z",
+            }
+            for index in range(count)
+        ]
+        return json.dumps(
+            {"success": True, "summary": f"查到 {count} 个任务", "data": {"tasks": items}},
+            ensure_ascii=False,
+        )
+
+    def test_output_is_still_valid_json(self):
+        raw = self._payload()
+        compressed = compress_text(raw, 300)
+
+        parsed = json.loads(compressed)  # 不合法会直接抛，这就是断言
+        self.assertIn("data", parsed)
+
+    def test_data_field_is_not_dropped(self):
+        raw = self._payload()
+        parsed = json.loads(compress_text(raw, 300))
+
+        tasks = parsed["data"]["tasks"]
+        self.assertGreater(len(tasks), 1)
+        # 头尾都要留：开头是有序的早期条目，结尾通常是最新的一条
+        self.assertEqual(tasks[0]["id"], 0)
+        self.assertEqual(tasks[-1]["id"], 29)
+        self.assertTrue(any(item.get("omitted_count") for item in tasks))
+
+    def test_tighter_budget_keeps_shrinking_but_stays_valid(self):
+        raw = self._payload(60)
+        for budget in (400, 200, 90):
+            compressed = compress_text(raw, budget)
+            parsed = json.loads(compressed)
+            self.assertIn("data", parsed)
+            self.assertLessEqual(estimate_tokens(compressed), budget)
+
+    def test_json_nested_in_string_field_degrades_gracefully(self):
+        """收紧到只剩骨架仍然超预算时，退回硬截断而不是产出坏 JSON。
+
+        这是一条明确的取舍：宁可让模型看到"这里被截断了"的纯文本，
+        也不要让它拿到一段看似完整、实际解析失败的 JSON。
+        """
+        raw = json.dumps({"k": "值" * 4000}, ensure_ascii=False)
+        compressed = compress_text(raw, 40)
+
+        self.assertLessEqual(estimate_tokens(compressed), 40)
+
+
+class EdgeSegmentTests(TestCase):
+    """首尾段只有位置加成，没有豁免权。"""
+
+    def test_edges_are_kept_when_budget_allows(self):
+        segments = ["开场白。"] + [f"第{index}项：普通内容。" for index in range(30)] + ["以上。"]
+        compressed = compress_text("\n".join(segments), 240)
+
+        self.assertIn("开场白", compressed)
+        self.assertIn("以上", compressed)
+
+    def test_edges_can_be_dropped_when_budget_is_tiny(self):
+        """预算只够一段时，硬保首尾会把结论挤掉。这里只要求"不超预算且留痕"。"""
+        segments = ["开场白" + "很长的铺垫" * 40] + [
+            f"第{index}项：普通内容。" for index in range(30)
+        ] + ["结论：必须锁定周三下午。"]
+
+        compressed = compress_text("\n".join(segments), 120)
+
+        self.assertLessEqual(estimate_tokens(compressed), 120)
+        self.assertIn("必须锁定", compressed)  # 约束句优先于位置加成
+
+    def test_cut_point_is_aligned_to_punctuation(self):
+        from app.agent.compaction import _align_cut
+
+        text = "甲乙丙。丁戊己"
+        self.assertEqual(_align_cut(text, 5), 4)  # 退到「。」之后
+        self.assertEqual(_align_cut(text, 3), 3)  # 窗口内没有标点就原样返回
+
+    def test_middle_truncation_does_not_cut_inside_a_sentence(self):
+        text = "".join(f"第{index}句话的内容在这里。" for index in range(200))
+        compressed = compress_text(text, 120)
+
+        self.assertLessEqual(estimate_tokens(compressed), 120)
+        self.assertIn("较长历史内容已压缩", compressed)
+        # 标记前面应当是完整的一句，而不是半截
+        head = compressed.split("...", 1)[0]
+        self.assertTrue(head.endswith("。"), head[-12:])
 
 
 class CompactPayloadTests(TestCase):
@@ -229,7 +332,10 @@ class LoopBudgetTests(TestCase):
     def test_dropped_history_is_announced_in_system_prompt(self):
         self.loop.HISTORY_TOKEN_BUDGET = 60
         for index in range(6):
-            self.loop.memory.add("s1", "user", f"第{index}轮：" + "很长的历史内容" * 60)
+            chat_service.append_message(
+                self.db, "s1", "user", f"第{index}轮：" + "很长的历史内容" * 60
+            )
+        self.db.commit()
 
         messages = self.loop._build_messages(self.db, "s1", "继续")
         system = messages[0]["content"]
@@ -241,12 +347,36 @@ class LoopBudgetTests(TestCase):
     def test_history_never_exceeds_budget(self):
         self.loop.HISTORY_TOKEN_BUDGET = 300
         for index in range(8):
-            self.loop.memory.add("s2", "assistant", f"回复{index}：" + "内容" * 400)
+            chat_service.append_message(
+                self.db, "s2", "assistant", f"回复{index}：" + "内容" * 400
+            )
+        self.db.commit()
 
         messages = self.loop._build_messages(self.db, "s2", "继续")
-        history = messages[1:]
+        # 末条是本轮用户消息，不占历史预算；历史部分要落在窗口与 token 闸门之内。
+        history = messages[1:-1]
+        self.assertEqual(messages[-1], {"role": "user", "content": "继续"})
 
         self.assertLessEqual(
             sum(estimate_message_tokens(item) for item in history),
             self.loop.HISTORY_TOKEN_BUDGET,
         )
+
+    def test_history_is_read_from_database_not_process_cache(self):
+        """同一 session 换一个循环实例也要看得到历史——旧的进程内字典做不到。"""
+        chat_service.append_message(self.db, "s3", "user", "周六上午去南京")
+        chat_service.append_message(self.db, "s3", "assistant", "好的，已记下")
+        self.db.commit()
+
+        fresh_loop = AgentLoop(
+            llm=MockProvider(),
+            registry=build_default_registry(),
+            memory=Memory(),
+            confirmation_store=PendingActionStore(),
+        )
+        messages = fresh_loop._build_messages(self.db, "s3", "把地点改成苏州")
+
+        contents = [item["content"] for item in messages]
+        self.assertIn("周六上午去南京", contents)
+        self.assertIn("好的，已记下", contents)
+        self.assertEqual(messages[-1]["content"], "把地点改成苏州")

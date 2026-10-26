@@ -134,10 +134,6 @@ class AgentChatAPIValidationTests(TestCase):
             "app.api.agent.agent_run_service.record_run",
             return_value=type("_Run", (), {"id": "run-1"})(),
         )
-        self.session_patch = patch(
-            "app.api.agent.agent.memory.has_session",
-            return_value=True,
-        )
         # TestClient 创建时 FastAPI 会做 lifespan，但我们的最小 app 不接数据库；
         # 简单替换 get_db 以提供工作 session
         from app.database import get_db
@@ -155,12 +151,10 @@ class AgentChatAPIValidationTests(TestCase):
         self.client = TestClient(self.application)
         self.handle_patch.start()
         self.run_patch.start()
-        self.session_patch.start()
 
     def tearDown(self):
         self.handle_patch.stop()
         self.run_patch.stop()
-        self.session_patch.stop()
 
     def test_post_chat_with_huge_message_returns_422(self):
         response = self.client.post(

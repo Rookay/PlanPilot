@@ -25,6 +25,7 @@ from app.agent.memory import Memory
 from app.llm.base import LLMProvider
 from app.llm.exceptions import LLMAuthError, LLMRateLimitError, LLMTransientError
 from app.llm.mock import MockProvider
+from app.services import chat_service
 from app.skills.base import SkillRegistry
 from app.tools.registry import ToolRegistry
 
@@ -62,16 +63,6 @@ class AgentResult:
     selected_skill: Optional[str] = None
     #: 场景来源：keyword（规则先验）/ model（模型自选）/ none（通用模式）。
     skill_source: str = "none"
-
-
-@dataclass
-class LLMStatus:
-    state: str = STATE_OK
-    consecutive_failures: int = 0
-    last_error_type: Optional[str] = None
-    last_error_message: Optional[str] = None
-    last_success_at: Optional[float] = None
-    fallback_until: float = 0.0
 
 
 @dataclass
@@ -154,7 +145,10 @@ class AgentLoop:
         self.last_run_provider: Optional[str] = None
 
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
-        self.memory.add(session_id, "user", message)
+        # 不在这里登记用户消息：历史由 _build_messages 从 chat_messages 表按需读取，
+        # 落库由 API 层统一在事务末尾完成。中间产生的 assistant / tool 消息只活在
+        # 本轮局部变量 messages 里，不进入下一轮的上下文——工具调用轨迹对下一次
+        # 请求没有价值，带上反而挤占预算。
 
         # 关键词路由只提供"先验"：命中就用，后续模型可通过 select_skill 覆盖。
         selected_skill = (
@@ -264,10 +258,6 @@ class AgentLoop:
 
             if response.is_text() or not response.tool_calls:
                 reply = response.text or "（模型未返回内容）"
-                self.memory.add_message(
-                    session_id,
-                    response.raw_message or {"role": "assistant", "content": reply},
-                )
                 return AgentResult(
                     reply=reply,
                     session_id=session_id,
@@ -318,7 +308,6 @@ class AgentLoop:
                             proposed_schedules,
                             model_usage,
                         )
-                        self.memory.add(session_id, "assistant", reply)
                         return AgentResult(
                             reply=reply,
                             session_id=session_id,
@@ -602,7 +591,6 @@ class AgentLoop:
                     session_id=session_id,
                 )
                 confirmation_reply = f"需要你确认：{confirmation_summary}"
-                self.memory.add(session_id, "assistant", confirmation_reply)
                 return AgentResult(
                     reply=confirmation_reply,
                     session_id=session_id,
@@ -632,7 +620,6 @@ class AgentLoop:
                     proposed_schedules,
                     model_usage,
                 )
-                self.memory.add(session_id, "assistant", reply)
                 return AgentResult(
                     reply=reply,
                     session_id=session_id,
@@ -651,7 +638,6 @@ class AgentLoop:
             proposed_schedules,
             model_usage,
         )
-        self.memory.add(session_id, "assistant", reply)
         return AgentResult(
             reply=reply,
             session_id=session_id,
@@ -754,9 +740,12 @@ class AgentLoop:
 
         system += "\n\n当前数据快照：\n" + build_world_summary(db, timezone)
 
-        # 历史先算：丢了几条要写进 system prompt，让模型知道上下文有缺口。
+        # 历史从表里读，不查进程内缓存：多 worker 与进程重启都不会丢上下文。
+        # 当前这轮的用户消息还没落库（事务在 API 层末尾才提交），单独补在末尾。
         history, dropped = self._prepare_history(
-            self.memory.recent(session_id, limit=self.HISTORY_MESSAGE_LIMIT)
+            chat_service.recent_messages(
+                db, session_id, limit=self.HISTORY_MESSAGE_LIMIT
+            )
         )
         if dropped:
             system += (
@@ -766,6 +755,7 @@ class AgentLoop:
 
         messages: List[dict] = [{"role": "system", "content": system}]
         messages.extend(history)
+        messages.append({"role": "user", "content": message})
         return messages
 
     def _resolve_skill(self, result):
@@ -803,21 +793,6 @@ class AgentLoop:
                 continue
             available.append(schema)
         return available
-
-    def _compact_history(self, messages: List[dict]) -> List[dict]:
-        """逐条压缩历史消息（只做单条压缩，不做总量取舍）。
-
-        压缩按信息密度取舍：含约束词（必须 / 截止 / 锁定）、时间、ID、数字的段落
-        优先保留，纯叙述性的长段落先被丢掉。首尾两段始终保留——开头交代背景、
-        结尾通常是上一轮的结论。
-        """
-
-        kept, _ = prepare_history(
-            messages,
-            message_token_limit=self.HISTORY_MESSAGE_TOKEN_LIMIT,
-            total_token_limit=float("inf"),
-        )
-        return kept
 
     def _prepare_history(self, messages: List[dict]) -> tuple[List[dict], int]:
         """按 token 总预算从最新往回保留历史，返回 (消息, 被丢弃条数)。

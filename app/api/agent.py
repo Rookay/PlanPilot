@@ -21,7 +21,7 @@ from app.schemas.agent import (
     ConfirmationInfoSchema,
 )
 from app.schemas.chat import ChatMessageResponse
-from app.services import agent_run_service
+from app.services import agent_run_service, chat_service
 
 router = APIRouter(
     prefix="/api/agent",
@@ -75,14 +75,10 @@ def session_messages(session_id: str, db: Session = Depends(get_db)):
 
 @router.delete("/sessions/{session_id}/messages")
 def clear_session_messages(session_id: str, db: Session = Depends(get_db)):
-    deleted = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.session_id == session_id)
-        .delete(synchronize_session=False)
-    )
+    deleted = chat_service.clear_messages(db, session_id)
     deleted_runs = agent_run_service.clear_runs(db, session_id)
     db.commit()
-    agent.memory.clear(session_id)
+    # 没有进程内缓存要清理：历史每次请求都从表里读，删表即生效。
     return {"deleted": deleted, "deleted_runs": deleted_runs}
 
 
@@ -101,18 +97,6 @@ def agent_chat(
     db: Session = Depends(get_db),
 ):
     session_id = payload.session_id or uuid.uuid4().hex
-
-    if not agent.memory.has_session(session_id):
-        persisted = (
-            db.query(ChatMessage)
-            .filter(ChatMessage.session_id == session_id)
-            .order_by(ChatMessage.id.asc())
-            .all()
-        )
-        agent.memory.hydrate(
-            session_id,
-            [{"role": item.role, "content": item.content} for item in persisted],
-        )
 
     started = time.perf_counter()
     result = agent.handle(
@@ -215,20 +199,11 @@ def agent_chat(
     result.run_status = run_status
 
     if payload.message.strip():
-        db.add(
-            ChatMessage(
-                session_id=session_id,
-                role="user",
-                content=payload.message.strip(),
-            )
+        chat_service.append_message(
+            db, session_id, "user", payload.message.strip()
         )
-    db.add(
-        ChatMessage(
-            session_id=session_id,
-            role="assistant",
-            content=result.reply,
-            agent_run_id=run.id,
-        )
+    chat_service.append_message(
+        db, session_id, "assistant", result.reply, agent_run_id=run.id
     )
     db.commit()
 

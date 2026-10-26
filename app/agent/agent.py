@@ -67,18 +67,14 @@ class Agent:
         # 提前 commit，恢复出的状态与真实 DB 会出现不可调和的分叉。
         pending = self.confirmation_store.get(db, action_id, session_id)
         if pending is None:
-            result = AgentResult(
+            return AgentResult(
                 reply="该确认请求不存在或已过期，请重新发起操作。",
                 session_id=session_id,
             )
-            self.memory.add(session_id, "assistant", result.reply)
-            return result
 
         if decision == "reject":
             self.confirmation_store.remove(db, action_id)
-            result = AgentResult(reply="已取消该操作。", session_id=session_id)
-            self.memory.add(session_id, "assistant", result.reply)
-            return result
+            return AgentResult(reply="已取消该操作。", session_id=session_id)
 
         snapshot = AgentDatabaseSnapshot.capture(db)
         applied: list = []
@@ -136,11 +132,9 @@ class Agent:
             proposed_schedules=proposed,
             tool_calls=tool_calls,
         )
-        self.memory.add(session_id, "assistant", result.reply)
         return result
 
     def _finalize_result(self, db: Session, result: AgentResult) -> AgentResult:
-        reply_before_audit = result.reply
         result.workflow_steps = [
             {
                 "kind": "tool",
@@ -176,6 +170,6 @@ class Agent:
                 )
                 if audit["issues"]:
                     result.reply += " 复查发现：" + "；".join(audit["issues"])
-        if result.reply != reply_before_audit:
-            self.memory.replace_last_assistant(result.session_id, result.reply)
+        # 复查补充的结论文本直接落在 result.reply 上：API 层写 chat_messages 时
+        # 取的就是这个值，不需要再回头改某个已经存下来的副本。
         return result
