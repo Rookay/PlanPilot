@@ -10,7 +10,7 @@
 
 - ✅ Planning Engine 抽取到 `app/planning/engine.py`（generate / find_free_slots / check_conflicts / evaluate_plan）
 - ✅ 业务逻辑抽取到 `app/services/`（task / event / schedule）
-- ✅ Tool 骨架 + 33 个工具（`app/tools/`）
+- ✅ Tool 骨架 + 37 个工具（`app/tools/`）
 - ✅ Skill 系统（`app/skills/`，第一版为提示词档案）
 - ✅ Agent Loop / Context / Memory / Confirmation（`app/agent/`）
 - ✅ LLM Provider 抽象 + MockProvider + OpenAICompatibleProvider（`app/llm/`）
@@ -36,6 +36,8 @@
 - ✅ 日程组整体顺延、批量删改、交通方式切换与原子确认
 - ✅ Agent Run 持久化轨迹、阶段状态与工具耗时
 - ✅ 隔离数据库的端到端 Agent 评测场景、聚合指标与前端评测页
+- ✅ 记忆三层：全量流水 / 滚动摘要（五段结构 + 确定性降级）/ 规则-偏好-事实分区（候选制）
+- ✅ 提示注入防线：规则区声明优先级，长期事实与摘要不得修改规则
 
 接入真实大模型见 [docs/llm-integration.md](./llm-integration.md)。
 
@@ -195,8 +197,10 @@ mine/
 |---|---|---|
 | Agent | `app/agent/agent.py` | 总编排：持有 Loop、Provider、Registry、Context、Memory、Confirmation |
 | Agent Loop | `app/agent/loop.py` | 决策循环、步数限制、工具调度、错误恢复、防循环 |
-| Context Builder | `app/agent/context.py` | 按请求动态构造最小上下文（分层） |
-| Memory | `app/agent/memory.py` | 长期偏好（短期历史见 `app/services/chat_service.py`） |
+| Context Builder | `app/agent/context.py` | 规则区常量的唯一来源；每请求拼装 system prompt 与业务快照 |
+| Memory | `app/agent/memory.py` | 长期偏好访问器（短期历史见 `chat_service`，摘要见 `summary.py`） |
+| Summary | `app/agent/summary.py` | 层二折叠：五段摘要、确定性降级、顺带提取事实 |
+| Compaction | `app/agent/compaction.py` | token 估算、按信息密度压缩、工具结果瘦身、历史预算 |
 | Confirmation | `app/agent/confirmation.py` | 待确认变更集的管理与提交 |
 | LLM Provider | `app/llm/base.py` 等 | 模型抽象、工具调用、结构化输出、解析 |
 | Tool | `app/tools/*` | 原子能力（CRUD、查询、规划） |
@@ -565,36 +569,78 @@ class ContextBuilder:
 
 ## 9. Memory Architecture
 
-> 第一版不做复杂长期记忆。
+> 三层，边界按「谁负责正确」划分，而不是按「存多久」划分。
 
-### 9.1 短期上下文（Short-term Context）
+| 层 | 载体 | 职责 | 进 prompt |
+|---|---|---|---|
+| 层一 聊天记录 | `chat_messages` | 全量流水，只增不改，回答「当时说了什么」 | 否（不进提示词） |
+| 层二 context | `session_summaries` + 预算常量 | 给模型的压缩版，回答「这轮该带多少」 | 是 |
+| 层三 memory | `context.py` 常量 / `user_preferences` / `memory_facts` | 跨会话稳定信息，回答「哪些是长期成立的」 | 是 |
 
-- 当前会话的对话历史（`chat_messages` 需要增加 `session_id`）。
-- 当前规划任务的中间状态（proposed plan、待确认变更）。
+### 9.1 层一：聊天记录（Short-term / Full Log）
 
-**当前实现（与最初设计的差异）**：短期历史不放进程内存。每次请求由
-`chat_service.recent_messages()` 从 `chat_messages` 读最近 10 条窗口，落库在
-API 层事务末尾统一完成；本轮 `assistant` 的 `tool_calls` 与工具结果只活在局部
-`messages` 里，不进入下一轮上下文。这样多 worker 与进程重启都不需要额外同步，
-代价是每请求一次带索引的查询。
+- 每次请求由 `chat_service.window_messages()` 从 `chat_messages` 读最近
+  `SUMMARY_WINDOW_MESSAGES = 60` 条，进程内不缓存。
+- 落库在 API 层事务末尾统一完成；本轮 `assistant` 的 `tool_calls` 与工具结果
+  只活在局部 `messages` 里，不进入下一轮上下文（**已知缺口**：这些轨迹目前
+  没有落表，"全量"只对纯文本成立）。
+- 多 worker 与进程重启都不需要额外同步，代价是每请求一次带索引的查询。
 
-### 9.2 长期用户偏好（Long-term User Preferences）
+### 9.2 层二：context（摘要 + 预算）
 
-- 第一版只保留**简单键值配置**，例如：
+两级处理，顺序不能颠倒：
+
+1. **折叠**（`app/agent/summary.py` + `session_summaries`）
+   - 触发：窗口内未被摘要覆盖的消息数超出保留窗口 `HISTORY_MESSAGE_LIMIT = 10`
+     达 `SUMMARY_MIN_FOLD_MESSAGES = 8` 条以上。
+   - 产出：五段结构 `constraints / decisions / corrections / suspended /
+     entities`，带片段编号，`SUMMARY_MAX_TOKENS = 400` 封顶。
+   - 覆盖：`covered_to_message_id` 单调前进；摘要输入按
+     `SUMMARY_INPUT_TOKEN_BUDGET = 2000` 从最新往回装，装不下时不宣告覆盖，
+     下一轮重折，避免静默丢消息。
+   - 降级三级：模型 → 确定性压缩（`digest`，标注「自动压缩」）→ 不折。
+2. **预算**（`compaction.py`）
+   - 单条 `HISTORY_MESSAGE_TOKEN_LIMIT = 1200`、历史 `HISTORY_TOKEN_BUDGET =
+     3600`、整包 `PROMPT_TOKEN_BUDGET = 18000`。
+   - 整包超预算时按体积降级工具结果（剥 `data` 留 `success` / `summary`），
+     `tool_call_id` 必须成对，所以只瘦身不删除。
+
+**为什么阈值用条数、体积用 token**：触发条件若也用 token，长消息会先撞上 token
+闸门被丢弃，摘要永远等不到触发条件，反而更容易丢约束。
+
+### 9.3 层三：memory（规则 / 偏好 / 事实）
+
+- **规则区**：`app/agent/context.py` 里的 23 条业务规则 + 时区 + 优先级声明。
+  代码常量，模型只读。放在代码里不是省事——如果模型能改，「忽略以上规则」这类
+  提示注入就真的能生效。
+- **偏好区**：`user_preferences` 表，结构化字段，用户显式设定。
 
 ```json
 {
   "work_hours": "09:00-18:00",
   "lunch_time": "12:00-13:00",
   "default_task_duration_min": 60,
-  "prefer_high_priority_in_morning": true,
   "timezone": "Asia/Shanghai"
 }
 ```
 
-- 存储建议：新增 `user_preferences` 表（`key` / `value` / `updated_at`），或单行 JSON 配置表。
-- 接口：`Memory.get_preferences()` / `Memory.set_preference(key, value)`。
-- 由 Agent 在需要时「读偏好」，在用户明确表达偏好时「写偏好」（写偏好需确认）。
+- **事实区**：`memory_facts` 表，候选制。
+  - 提取：折叠摘要时顺带让模型输出（同一次调用，不额外发请求）。
+  - 去重：归一化文本的 `fingerprint` 唯一索引。
+  - 转正：首次 `candidate`，同一指纹再出现（`hit_count >= 2`）转 `confirmed`；
+    只有 `confirmed` 注入 system prompt。
+  - 否决：`rejected` 后不再自动复活；`PATCH /api/memory/facts/{id}` 人工确认 /
+    否决，`DELETE` 物理删除。
+- 接口：`Memory.get_preferences()` / `Memory.set_preference(key, value)` 只管
+  偏好；事实走 `fact_service`。
+
+### 9.4 为什么不放进程内缓存
+
+原先的 `Memory` 是按 session 分桶的 dict + 一把 `threading.Lock`。锁只保证「同
+进程多线程不互相改坏列表」，管不住多 worker 与重启：同一会话的第二个请求落到
+另一个进程，那个进程的 dict 是空的。为补这个洞才长出 `has_session` / `hydrate`
+这一对，等于把缓存一致性问题搬进了业务代码。现在把共享状态整体拿掉，只留下
+「每请求读一次带索引的表」。
 
 ---
 

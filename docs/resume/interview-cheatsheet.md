@@ -1,7 +1,7 @@
 # PlanPilot 面试速记（一页版）
 
 > **打印这一页就够了。** 详细展开看 `interview-pitch.md`（27 题开口稿），120 题查 `interview-handbook.md`（整理版字典），更早的原始稿是 `interview-prep.md`。
-> 核对基线：`improvement` 分支 2026-10-26 快照（37 工具 / 10 Skill / 236 测试）。本文所有数字与结论均已对代码 / 测试核实，可直接说。
+> 核对基线：`improvement` 分支 2026-10-26 快照（37 工具 / 10 Skill / 270 测试）。本文所有数字与结论均已对代码 / 测试核实，可直接说。
 
 ---
 
@@ -9,17 +9,19 @@
 
 | 控制项 | 值 | 出处 |
 |---|---|---|
-| 迭代上限 | `MAX_ITERATIONS = 12` | `loop.py:89` |
-| 普通工具总量 | `MAX_TOOL_CALLS = 24`（**轮末检查，非逐次硬上限**） | `loop.py:90` |
-| 历史条数 / 单条长度 | 最近 10 条 / 单条 1200 token，历史总预算 3600 token | `loop.py:92-99` |
-| prompt 总量 | 18000 token，超了按体积降级工具结果 | `loop.py:99` |
-| 会话历史窗口 | 最近 10 条，每请求从 `chat_messages` 读（进程内无状态） | `chat_service.py` |
+| 迭代上限 | `MAX_ITERATIONS = 12` | `loop.py:90` |
+| 普通工具总量 | `MAX_TOOL_CALLS = 24`（**轮末检查，非逐次硬上限**） | `loop.py:91` |
+| 历史条数 / 单条长度 | 保留 10 条 / 单条 1200 token，历史总预算 3600 token | `loop.py:93-98` |
+| prompt 总量 | 18000 token，超了按体积降级工具结果 | `loop.py:100` |
+| 摘要触发 | 窗口读 60 条，溢出满 8 条开折；摘要 400 token 封顶 | `loop.py:103,106` + `summary.py` |
+| 事实转正 | 同一指纹出现 2 次转 confirmed；rejected 不复活 | `fact_service.py` |
+| 会话历史窗口 | 最近 60 条读入（保留 10 条），每请求从 `chat_messages` 读 | `chat_service.py` |
 | 待确认 TTL | 600 秒 | `confirmation` |
-| 退避 | 基础 60～600 秒，抖动 0～20%（实际最长 ~720） | `loop.py:116-118` |
+| 退避 | 基础 60～600 秒，抖动 0～20%（实际最长 ~720） | `loop.py:123-125` |
 | 模型单次超时 | 30 秒 | `config.py:54` |
 | CP-SAT | 每次 Solve 5 秒；外层最多 13 轮校验重求 | `optimizer` |
 | 缓存 TTL | 路线 5 分钟 / 地点搜索 24 小时 / 地理编码 30 天 | `maps/service.py:46,61,87` |
-| 规模 | 37 工具 / 10 Skill / 236 测试 / 5 个 Mock 评测场景 / 11 张表（快照 6 张） | — |
+| 规模 | 37 工具 / 10 Skill / 270 测试 / 5 个 Mock 评测场景 / 13 张表（快照 6 张） | — |
 
 **逐工具额度**：`get_weather / get_events / get_tasks / get_schedules` 各 3；`generate_plan / replan / replan_local` 各 2；`check_conflicts / evaluate_plan / compare_plan_alternatives / apply_plan_alternative` 各 1；`search_places / geocode_address` 各 8；`estimate_travel_time` 12。
 
@@ -88,7 +90,7 @@ FEASIBLE          ≠  已证明最优（不等于 OPTIMAL）
 模型看哪些上下文 → 为什么是 10 条 → 截断丢了约束怎么办 → 工具历史持久化吗 → 多 worker 一致吗 → 什么时候才需要语义记忆
 
 **D 评测**
-236 个测试测了什么 → Mock 能证明模型效果吗 → 真实评测怎么设计 → 路径不同算错吗 → 怎么测确认安全 → 怎么避免调 prompt 过拟合
+270 个测试测了什么 → Mock 能证明模型效果吗 → 真实评测怎么设计 → 路径不同算错吗 → 怎么测确认安全 → 怎么避免调 prompt 过拟合
 
 **E 规划**
 为什么用求解器 → 变量和目标是什么 → FEASIBLE 和 OPTIMAL 差在哪 → 地图约束怎么接进去 → 13 轮后还不合法怎么办 → 总时间预算怎么设
@@ -106,7 +108,7 @@ FEASIBLE          ≠  已证明最优（不等于 OPTIMAL）
 | 3 | "SQLite 默认不开 SAVEPOINT，所以不能用"（L290） | 归因错误；问题是 commit 边界与驱动事务模式 |
 | 4 | "路线缓存 TTL 24 小时"（L418） | 路线 **5 分钟**；24 小时是地点搜索；地理编码 30 天 |
 | 5 | "用 MockProvider + 自建 SSE 绕开流式需求"（L451） | **代码里没有任何 SSE**，接口一次返回完整 JSON |
-| 6 | "9 张表"（L460、L495） | 11 张表；常用地点表叫 `saved_locations` |
+| 6 | "9 张表"（L460、L495） | 13 张表；常用地点表叫 `saved_locations` |
 | 7 | "改时区偏好后显示层统一转换"（L479-489） | 主日历按**浏览器时区**渲染，未统一按 `preferences.timezone` |
 | 8 | "五个指标"（L532） | metrics 七项：四项质量率 + 耗时 / token / 费用 |
 | 9 | "只依赖 6 个库"（L65、L232、L442） | 直接运行依赖 6 项；测试还需额外包，不能称"零其他依赖" |
