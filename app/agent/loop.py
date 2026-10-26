@@ -64,6 +64,10 @@ class AgentResult:
     selected_skill: Optional[str] = None
     #: 场景来源：keyword（规则先验）/ model（模型自选）/ none（通用模式）。
     skill_source: str = "none"
+    #: 本轮完整的工具调用轨迹（call 与 observation 成对），供 API 层落库。
+    #: 与 ``tool_calls`` 的区别：``tool_calls`` 是给界面看的摘要，字段为展示
+    #: 服务（stage / label）；``trajectory`` 保留协议原貌，用于回放与排查。
+    trajectory: List[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -152,10 +156,25 @@ class AgentLoop:
         self.last_run_provider: Optional[str] = None
 
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
+        # 轨迹在这里统一收口。工具 observation 分散在十来处 append，逐处记录既容易
+        # 漏，也会让主循环被审计代码淹没；改成把 messages 交给一个可变容器，等
+        # 循环结束再统一配对。容器是请求内的局部对象，不是进程状态，并发安全。
+        holder: dict = {}
+        result = self._run_loop(db, message, session_id, holder)
+        result.trajectory = self._extract_trajectory(holder.get("messages") or [])
+        return result
+
+    def _run_loop(
+        self,
+        db: Session,
+        message: str,
+        session_id: str,
+        holder: dict,
+    ) -> AgentResult:
         # 不在这里登记用户消息：历史由 _build_messages 从 chat_messages 表按需读取，
         # 落库由 API 层统一在事务末尾完成。中间产生的 assistant / tool 消息只活在
-        # 本轮局部变量 messages 里，不进入下一轮的上下文——工具调用轨迹对下一次
-        # 请求没有价值，带上反而挤占预算。
+        # 本轮局部变量 messages 里，不进入下一轮的上下文——但会作为轨迹落库，
+        # 供回看与排查（不参与下一轮 prompt）。
 
         # 关键词路由只提供"先验"：命中就用，后续模型可通过 select_skill 覆盖。
         selected_skill = (
@@ -171,6 +190,9 @@ class AgentLoop:
             else None
         )
         messages = self._build_messages(db, session_id, message, selected_skill)
+        # 交给调用方持有引用：后续所有 append 都发生在这个同一个 list 上，
+        # 循环提前 return 也能拿到截至目前完整的轨迹。
+        holder["messages"] = messages
 
         tool_call_log: List[dict] = []
         applied_changes: List[dict] = []
@@ -993,6 +1015,113 @@ class AgentLoop:
         if summaries:
             return "我已经执行到这里：" + "；".join(summaries[-4:])
         return "我尝试处理了这次请求，但工具没有返回可用结果，请稍微换一种说法再试。"
+
+    #: 轨迹里单条 observation 的落库上限。工具结果本身已经过 ``compact_payload``，
+    #: 但地图路线一类仍可能到几 KB；审计需要的是"调了什么、成没成、关键返回"，
+    #: 不是把整个响应体灌进业务库。
+    TRAJECTORY_RESULT_CHARS = 4000
+
+    @classmethod
+    def _extract_trajectory(cls, messages: List[dict]) -> List[dict]:
+        """把局部 messages 里的 ``assistant.tool_calls`` 与 ``tool`` 消息配对。
+
+        配对失败的调用也保留（``success=False`` + error 说明）。截断本身是排查
+        线索——"模型调了但没拿到结果"和"模型根本没调"是两种完全不同的故障，
+        悄悄丢掉前者会让人误判成因。
+        """
+
+        records: List[dict] = []
+        pending: dict = {}
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+
+            if message.get("role") == "assistant":
+                for call in message.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    function = call.get("function") or {}
+                    call_id = str(call.get("id") or "")
+                    record = {
+                        "turn_index": len(records),
+                        "tool_call_id": call_id,
+                        "name": str(function.get("name") or ""),
+                        "arguments": cls._as_text(function.get("arguments")),
+                        "success": False,
+                        "summary": None,
+                        "error": "本轮未返回结果（调用被中断）",
+                        "result": None,
+                        "result_chars": 0,
+                    }
+                    records.append(record)
+                    pending[call_id] = record
+                continue
+
+            if message.get("role") != "tool":
+                continue
+
+            call_id = str(message.get("tool_call_id") or "")
+            record = pending.pop(call_id, None)
+            if record is None:
+                # 有 observation 却没有对应 call。协议上不该出现，但既然消息里
+                # 有结果就说明确实执行过，仍要留痕，否则看起来像凭空多了一次执行。
+                record = {
+                    "turn_index": len(records),
+                    "tool_call_id": call_id,
+                    "name": str(message.get("name") or ""),
+                    "arguments": "",
+                    "success": False,
+                    "summary": None,
+                    "error": None,
+                    "result": None,
+                    "result_chars": 0,
+                }
+                records.append(record)
+
+            content = cls._as_text(message.get("content"))
+            record["result_chars"] = len(content)
+            record["result"] = (
+                content
+                if len(content) <= cls.TRAJECTORY_RESULT_CHARS
+                else content[: cls.TRAJECTORY_RESULT_CHARS] + "…[轨迹落库时截断]"
+            )
+            record["success"], record["summary"], record["error"] = cls._read_observation(
+                content
+            )
+
+        return records
+
+    @staticmethod
+    def _as_text(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _read_observation(content: str) -> tuple[bool, Optional[str], Optional[str]]:
+        """从 observation 文本里取出 ``(success, summary, error)``。
+
+        不是 JSON 时按"执行过但格式异常"处理：``success`` 记 False，原文进
+        summary。这条路径不该出现，真出现时原文比空值有用。
+        """
+
+        try:
+            parsed = json.loads(content)
+        except (TypeError, ValueError):
+            return False, content[:500] or None, "observation 不是合法 JSON"
+        if not isinstance(parsed, dict):
+            return False, str(parsed)[:500], "observation 不是 JSON 对象"
+
+        summary = parsed.get("summary")
+        error = parsed.get("error")
+        return (
+            bool(parsed.get("success")),
+            None if summary is None else str(summary),
+            None if error is None else str(error),
+        )
 
     @staticmethod
     def _tool_message(tool_call_id, name, success, summary=None, data=None, error=None) -> dict:

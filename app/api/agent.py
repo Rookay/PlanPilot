@@ -5,7 +5,7 @@
 
 import time
 import uuid
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -96,6 +96,40 @@ def session_runs(
     db: Session = Depends(get_db),
 ):
     return agent_run_service.list_runs(db, session_id, limit)
+
+
+@router.get("/sessions/{session_id}/tool-calls")
+def session_tool_calls(
+    session_id: str,
+    agent_run_id: Optional[str] = None,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    """回看某个会话（或某次运行）调用过哪些工具、各自返回了什么。
+
+    轨迹是审计用的，不参与对话上下文：把历史工具返回值再喂给模型，只会挤占
+    预算并诱导它把过时的查询结果当成当前事实。
+    """
+
+    return [
+        {
+            "id": row.id,
+            "agent_run_id": row.agent_run_id,
+            "turn_index": row.turn_index,
+            "tool_call_id": row.tool_call_id,
+            "name": row.name,
+            "arguments": row.arguments,
+            "success": row.success,
+            "summary": row.summary,
+            "error": row.error,
+            "result": row.result,
+            "result_chars": row.result_chars,
+            "created_at": row.created_at,
+        }
+        for row in chat_service.recent_tool_calls(
+            db, session_id, agent_run_id=agent_run_id, limit=limit
+        )
+    ]
 
 
 @router.post("/chat", response_model=AgentChatResponse)
@@ -209,6 +243,9 @@ def agent_chat(
         chat_service.append_message(
             db, session_id, "user", payload.message.strip()
         )
+    # 工具轨迹和消息、运行记录同属一个事务。分开提交会出现"有轨迹但查不到回复"
+    # 或反之的残片，回看时对不上号。
+    chat_service.append_tool_calls(db, session_id, run.id, result.trajectory)
     chat_service.append_message(
         db, session_id, "assistant", result.reply, agent_run_id=run.id
     )

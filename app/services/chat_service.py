@@ -23,6 +23,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from app.models.chat import ChatMessage
+from app.models.chat_tool_call import ChatToolCall
 
 
 def recent_messages(db: Session, session_id: str, limit: int = 20) -> List[dict]:
@@ -96,11 +97,72 @@ def append_message(
 def clear_messages(db: Session, session_id: str) -> int:
     """删除某个会话的全部消息，返回删除条数。**不 commit**。"""
 
+    # 轨迹跟着消息一起删。留着的后果不是"占点空间"，而是清空会话后回看还能
+    # 看到上一段对话调过哪些工具，等于没清干净。
+    db.query(ChatToolCall).filter(
+        ChatToolCall.session_id == session_id
+    ).delete(synchronize_session=False)
+
     return (
         db.query(ChatMessage)
         .filter(ChatMessage.session_id == session_id)
         .delete(synchronize_session=False)
     )
+
+
+def append_tool_calls(
+    db: Session,
+    session_id: str,
+    agent_run_id: Optional[str],
+    records: List[dict],
+) -> int:
+    """把一轮请求的工具调用轨迹落库，返回写入条数。**不 commit**。
+
+    和 :func:`append_message` 一样，事务边界留在 API 层：轨迹、消息、运行记录
+    必须同生同死，否则会出现"有轨迹但查不到对应回复"的残片。
+    """
+
+    for record in records or []:
+        db.add(
+            ChatToolCall(
+                session_id=session_id,
+                agent_run_id=agent_run_id,
+                turn_index=int(record.get("turn_index") or 0),
+                tool_call_id=str(record.get("tool_call_id") or ""),
+                name=str(record.get("name") or ""),
+                arguments=str(record.get("arguments") or ""),
+                success=bool(record.get("success")),
+                summary=record.get("summary"),
+                error=record.get("error"),
+                result=record.get("result"),
+                result_chars=int(record.get("result_chars") or 0),
+            )
+        )
+    return len(records or [])
+
+
+def recent_tool_calls(
+    db: Session,
+    session_id: str,
+    agent_run_id: Optional[str] = None,
+    limit: int = 200,
+) -> List[ChatToolCall]:
+    """读某个会话（或某次运行）的工具调用轨迹，按执行顺序返回。
+
+    轨迹**不进 prompt**：它是审计与回放用的。混进上下文只会挤占预算，还会让
+    模型把历史里早已过时的工具返回值当成当前事实。
+    """
+
+    if limit <= 0:
+        return []
+
+    query = db.query(ChatToolCall).filter(ChatToolCall.session_id == session_id)
+    if agent_run_id:
+        query = query.filter(ChatToolCall.agent_run_id == agent_run_id)
+
+    rows = query.order_by(ChatToolCall.id.desc()).limit(limit).all()
+    rows.reverse()
+    return rows
 
 
 def message_count(db: Session, session_id: str) -> int:

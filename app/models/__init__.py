@@ -8,6 +8,7 @@ from app.models.task import Task, TaskDependency
 from app.models.event import Event
 from app.models.schedule import Schedule
 from app.models.chat import ChatMessage
+from app.models.chat_tool_call import ChatToolCall
 from app.models.preference import UserPreference
 from app.models.location import SavedLocation
 from app.models.plan_version import PlanVersion
@@ -22,6 +23,7 @@ __all__ = [
     "Event",
     "Schedule",
     "ChatMessage",
+    "ChatToolCall",
     "UserPreference",
     "SavedLocation",
     "TaskDependency",
