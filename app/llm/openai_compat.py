@@ -23,6 +23,63 @@ from app.config import llm_config
 from app.llm.base import LLMProvider, LLMResponse, ToolCall
 from app.llm.exceptions import LLMAuthError, LLMRateLimitError, LLMTransientError
 
+#: 回传给模型的原始参数片段上限。足够让它看出语法错在哪,又不至于挤爆上下文。
+_MAX_RAW_ARGUMENT_CHARS = 200
+
+
+def _truncate_raw(text: str, limit: int = _MAX_RAW_ARGUMENT_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…（原文共 {len(text)} 字符）"
+
+
+def _parse_arguments(name: str, raw) -> tuple[dict, Optional[str]]:
+    """把模型给出的 ``arguments`` 解析成字典,并区分四类情况。
+
+    返回 ``(arguments, parse_error)``:
+
+    - 缺失 / 空串:合法的"无参数"调用 → ``({}, None)``
+    - 已经是字典:部分本地模型或代理直接给对象 → 原样接受
+    - JSON 语法错误:``({}, 说明)``
+    - 合法 JSON 但不是对象(数组、字符串、数字):``({}, 说明)``,
+      因为 ``**args`` 只接受字典
+
+    后两类必须保留 ``parse_error``。一旦退化成空字典,模型收到的反馈会变成
+    "缺字段",于是它去补字段而不是修语法,而参数全可选的工具甚至会静默执行成
+    一次宽松查询。
+    """
+
+    if raw is None:
+        return {}, None
+    if isinstance(raw, dict):
+        return raw, None
+    if not isinstance(raw, str):
+        return {}, (
+            f"{name} 的 arguments 应为 JSON 字符串，实际收到 "
+            f"{type(raw).__name__}。请重新输出完整的参数对象。"
+        )
+
+    text = raw.strip()
+    if not text:
+        return {}, None
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return {}, (
+            f"{name} 的参数不是合法 JSON（{exc.msg}，位置 {exc.pos}）。"
+            "请重新输出完整的参数对象，不要只补字段。"
+            f"你上次给出的原文：{_truncate_raw(text)}"
+        )
+
+    if not isinstance(parsed, dict):
+        return {}, (
+            f"{name} 的参数必须是 JSON 对象，实际是 {type(parsed).__name__}。"
+            f"你上次给出的原文：{_truncate_raw(text)}"
+        )
+
+    return parsed, None
+
 
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(
@@ -55,15 +112,16 @@ class OpenAICompatibleProvider(LLMProvider):
             calls = []
             for index, raw in enumerate(raw_calls):
                 function = raw.get("function", {})
-                try:
-                    arguments = json.loads(function.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    arguments = {}
+                name = function.get("name", "")
+                arguments, parse_error = _parse_arguments(
+                    name, function.get("arguments")
+                )
                 calls.append(
                     ToolCall(
                         id=raw.get("id") or f"call_{index}",
-                        name=function.get("name", ""),
+                        name=name,
                         arguments=arguments,
+                        parse_error=parse_error,
                     )
                 )
             return LLMResponse(

@@ -3,6 +3,7 @@ from datetime import datetime
 from unittest import TestCase
 from unittest.mock import patch
 
+from app.agent.compaction import estimate_tokens
 from app.agent.confirmation import PendingActionStore
 from app.agent.agent import Agent
 from app.agent.loop import AgentLoop
@@ -93,9 +94,13 @@ class AgentLoopTests(TestCase):
             confirmation_store=PendingActionStore(),
         )
         compacted = loop._compact_history(
-            [{"role": "assistant", "content": "A" * 3000}]
+            [{"role": "assistant", "content": "A" * 12000}]
         )
-        self.assertLess(len(compacted[0]["content"]), 1900)
+        # 阈值是 token 不是字符：超长单条要压到 token 上限以内，并留下省略标记。
+        self.assertLessEqual(
+            estimate_tokens(compacted[0]["content"]),
+            loop.HISTORY_MESSAGE_TOKEN_LIMIT,
+        )
         self.assertIn("较长历史内容已压缩", compacted[0]["content"])
 
         message = loop._tool_message(

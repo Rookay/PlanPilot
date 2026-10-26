@@ -19,12 +19,15 @@ from app.tools.defaults import build_default_registry
 def build_agent() -> Agent:
     # 优先使用 config.json / 环境变量配置的真实模型；未配置时退回 MockProvider。
     llm = from_config() or MockProvider()
+    # Skill 注册表要同时交给 loop（关键词先验）和 select_skill 工具（模型自选），
+    # 因此先构建一次再复用同一实例。
+    skills = build_default_skills()
     return Agent(
         llm=llm,
-        registry=build_default_registry(),
+        registry=build_default_registry(skills),
         memory=Memory(),
         confirmation_store=PendingActionStore(),
-        skill_registry=build_default_skills(),
+        skill_registry=skills,
     )
 
 

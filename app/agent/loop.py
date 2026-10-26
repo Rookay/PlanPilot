@@ -12,6 +12,13 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
+from app.agent.compaction import (
+    compact_payload,
+    degrade_tool_message,
+    estimate_message_tokens,
+    estimate_messages_tokens,
+    prepare_history,
+)
 from app.agent.confirmation import PendingActionStore
 from app.agent.context import build_system_prompt, build_world_summary
 from app.agent.memory import Memory
@@ -51,6 +58,10 @@ class AgentResult:
     duration_ms: int = 0
     run_status: str = "completed"
     model_usage: dict = field(default_factory=dict)
+    #: 本轮实际生效的场景标识；由关键词命中或模型 select_skill 切换得到。
+    selected_skill: Optional[str] = None
+    #: 场景来源：keyword（规则先验）/ model（模型自选）/ none（通用模式）。
+    skill_source: str = "none"
 
 
 @dataclass
@@ -86,8 +97,15 @@ class LLMStatus:
 class AgentLoop:
     MAX_ITERATIONS = 12
     MAX_TOOL_CALLS = 24
+    #: 历史条数上限，先按条数粗筛。
     HISTORY_MESSAGE_LIMIT = 10
-    HISTORY_CONTENT_LIMIT = 1800
+    #: 单条历史消息的 token 上限，超出后按信息密度压缩。
+    HISTORY_MESSAGE_TOKEN_LIMIT = 1200
+    #: 整段历史的 token 预算。条数相同时，10 条短消息和 10 条长消息差别很大，
+    #: 所以真正的闸门是 token 而不是条数。
+    HISTORY_TOKEN_BUDGET = 3600
+    #: 单次 prompt 的 token 总预算，超了就按"最大的工具结果优先降级"来削。
+    PROMPT_TOKEN_BUDGET = 18000
     TOOL_CALL_LIMITS = {
         "get_weather": 3,
         "get_events": 3,
@@ -107,6 +125,16 @@ class AgentLoop:
     BACKOFF_BASE_SECONDS = 60
     BACKOFF_MAX_SECONDS = 600
     BACKOFF_JITTER_RATIO = 0.2
+
+    #: 场景切换工具：无论当前场景白名单如何收窄都必须保持可见，
+    #: 否则模型切换到收窄场景后无法再切回，形成死锁。
+    SKILL_SWITCH_TOOL = "select_skill"
+    ALWAYS_AVAILABLE_TOOLS = {SKILL_SWITCH_TOOL}
+    #: 单轮允许的切换次数，防止模型在场景之间来回横跳。
+    MAX_SKILL_SWITCHES = 3
+    #: 单轮允许的参数解析失败次数。连续给出坏 JSON 说明模型在这套协议上不稳定，
+    #: 再重试大概率还是错，直接转无工具总结，别把预算耗在语法上。
+    MAX_ARGUMENT_PARSE_ERRORS = 2
 
     def __init__(
         self,
@@ -128,11 +156,14 @@ class AgentLoop:
     def run(self, db: Session, message: str, session_id: str) -> AgentResult:
         self.memory.add(session_id, "user", message)
 
+        # 关键词路由只提供"先验"：命中就用，后续模型可通过 select_skill 覆盖。
         selected_skill = (
             self.skill_registry.select(message)
             if self.skill_registry is not None
             else None
         )
+        skill_source = "keyword" if selected_skill is not None else "none"
+        skill_switch_count = 0
         active_tool_names = (
             set(selected_skill.allowed_tools)
             if selected_skill is not None and selected_skill.allowed_tools is not None
@@ -144,6 +175,7 @@ class AgentLoop:
         applied_changes: List[dict] = []
         proposed_schedules: List[dict] = []
         tool_call_count = 0
+        argument_parse_errors = 0
         seen_calls: set[str] = set()
         tool_call_counts: dict[str, int] = {}
         saturated_tools: set[str] = set()
@@ -151,6 +183,8 @@ class AgentLoop:
         provider = self.llm
 
         for _ in range(self.MAX_ITERATIONS):
+            # 每轮先核预算：12 轮累积的工具结果可能远超单条上限。
+            self._enforce_prompt_budget(messages)
             provider = self._pick_provider()
             used_real = provider is self.llm
             try:
@@ -241,6 +275,8 @@ class AgentLoop:
                     applied_changes=applied_changes,
                     proposed_schedules=proposed_schedules,
                     model_usage=model_usage,
+                    selected_skill=selected_skill.name if selected_skill is not None else None,
+                    skill_source=skill_source,
                 )
 
             # 先记录本轮 assistant 消息（原样回传 reasoning_content 等字段）。
@@ -254,6 +290,49 @@ class AgentLoop:
                 tool = self.registry.get(call.name)
                 call_key = self._call_key(call.name, call.arguments)
 
+                # 参数不是合法 JSON 对象：不执行工具，把解析说明当作 Observation。
+                # 必须与"字段缺失"分开——退化成空字典会让模型以为只是漏填，
+                # 于是反复补字段而不去修语法；参数全可选的工具还会静默执行成宽松查询。
+                if call.parse_error:
+                    argument_parse_errors += 1
+                    tool_call_count += 1
+                    messages.append(
+                        self._tool_message(call.id, call.name, False, error=call.parse_error)
+                    )
+                    tool_call_log.append(
+                        {
+                            "stage": "理解",
+                            "name": call.name,
+                            "arguments": call.arguments,
+                            "success": False,
+                            "summary": call.parse_error,
+                            "duration_ms": 0,
+                            "argument_error": True,
+                        }
+                    )
+                    if argument_parse_errors >= self.MAX_ARGUMENT_PARSE_ERRORS:
+                        reply = self._finalize_without_tools(
+                            provider,
+                            messages,
+                            tool_call_log,
+                            proposed_schedules,
+                            model_usage,
+                        )
+                        self.memory.add(session_id, "assistant", reply)
+                        return AgentResult(
+                            reply=reply,
+                            session_id=session_id,
+                            tool_calls=tool_call_log,
+                            applied_changes=applied_changes,
+                            proposed_schedules=proposed_schedules,
+                            model_usage=model_usage,
+                            selected_skill=(
+                                selected_skill.name if selected_skill is not None else None
+                            ),
+                            skill_source=skill_source,
+                        )
+                    continue
+
                 if tool is None:
                     messages.append(self._tool_message(call.id, call.name, False, f"unknown tool: {call.name}"))
                     tool_call_log.append(
@@ -262,6 +341,102 @@ class AgentLoop:
                             "name": call.name,
                             "success": False,
                             "summary": f"未知工具：{call.name}",
+                            "duration_ms": 0,
+                        }
+                    )
+                    continue
+
+                # 场景切换：不占普通工具预算（那是业务执行预算），但单独限次。
+                if call.name == self.SKILL_SWITCH_TOOL:
+                    skill_switch_count += 1
+                    if skill_switch_count > self.MAX_SKILL_SWITCHES:
+                        error = (
+                            f"本轮场景切换已达 {self.MAX_SKILL_SWITCHES} 次上限，"
+                            "请基于当前场景直接作答"
+                        )
+                        messages.append(
+                            self._tool_message(call.id, call.name, False, error=error)
+                        )
+                        tool_call_log.append(
+                            {
+                                "stage": "理解",
+                                "name": call.name,
+                                "arguments": call.arguments,
+                                "success": False,
+                                "limited": True,
+                                "summary": error,
+                                "duration_ms": 0,
+                            }
+                        )
+                        continue
+
+                    result = self.registry.execute(call.name, call.arguments, db)
+                    target = self._resolve_skill(result)
+                    if target is None:
+                        messages.append(
+                            self._tool_message(
+                                call.id,
+                                call.name,
+                                False,
+                                result.summary,
+                                None,
+                                result.error or "场景切换失败",
+                            )
+                        )
+                        tool_call_log.append(
+                            {
+                                "stage": "理解",
+                                "name": call.name,
+                                "arguments": call.arguments,
+                                "success": False,
+                                "summary": result.error or "场景切换失败",
+                                "duration_ms": 0,
+                            }
+                        )
+                        continue
+
+                    if selected_skill is not None and target.name == selected_skill.name:
+                        already = f"当前已在「{target.description}」场景，无需重复切换"
+                        messages.append(
+                            self._tool_message(
+                                call.id, call.name, True, already, {"name": target.name}
+                            )
+                        )
+                        tool_call_log.append(
+                            {
+                                "stage": "理解",
+                                "name": call.name,
+                                "arguments": call.arguments,
+                                "success": True,
+                                "summary": already,
+                                "duration_ms": 0,
+                            }
+                        )
+                        continue
+
+                    selected_skill = target
+                    skill_source = "model"
+                    active_tool_names = (
+                        set(target.allowed_tools)
+                        if target.allowed_tools is not None
+                        else None
+                    )
+                    # 先回 tool 结果（OpenAI 协议要求紧跟 tool_calls），再追加场景指引。
+                    messages.append(
+                        self._tool_message(
+                            call.id, call.name, True, result.summary, result.data
+                        )
+                    )
+                    messages.append(
+                        {"role": "system", "content": self._skill_hint_message(target)}
+                    )
+                    tool_call_log.append(
+                        {
+                            "stage": "理解",
+                            "name": call.name,
+                            "arguments": call.arguments,
+                            "success": True,
+                            "summary": result.summary,
                             "duration_ms": 0,
                         }
                     )
@@ -445,6 +620,8 @@ class AgentLoop:
                         preview=combined_preview,
                     ),
                     model_usage=model_usage,
+                    selected_skill=selected_skill.name if selected_skill is not None else None,
+                    skill_source=skill_source,
                 )
 
             if tool_call_count >= self.MAX_TOOL_CALLS:
@@ -463,6 +640,8 @@ class AgentLoop:
                     applied_changes=applied_changes,
                     proposed_schedules=proposed_schedules,
                     model_usage=model_usage,
+                    selected_skill=selected_skill.name if selected_skill is not None else None,
+                    skill_source=skill_source,
                 )
 
         reply = self._finalize_without_tools(
@@ -480,6 +659,8 @@ class AgentLoop:
             applied_changes=applied_changes,
             proposed_schedules=proposed_schedules,
             model_usage=model_usage,
+            selected_skill=selected_skill.name if selected_skill is not None else None,
+            skill_source=skill_source,
         )
 
     def replace_provider(self, provider: LLMProvider) -> None:
@@ -559,47 +740,133 @@ class AgentLoop:
             selected_skill = self.skill_registry.select(message)
         if selected_skill is not None:
             system += "\n\n" + selected_skill.system_hint
+            system += (
+                f"\n\n【当前场景】{selected_skill.name}（{selected_skill.description}）。"
+                "这是按关键词自动匹配的结果；如果它与用户真实意图不符，"
+                "调用 select_skill 切换到更合适的场景。"
+            )
+        elif self.skill_registry is not None:
+            system += (
+                "\n\n【当前场景】未匹配到预设场景，使用通用模式。"
+                "如果请求明显属于某个业务场景（可在 select_skill 的场景清单中查看），"
+                "先调用 select_skill 指定场景，再执行操作。"
+            )
 
         system += "\n\n当前数据快照：\n" + build_world_summary(db, timezone)
 
-        messages: List[dict] = [{"role": "system", "content": system}]
-        messages.extend(
-            self._compact_history(
-                self.memory.recent(session_id, limit=self.HISTORY_MESSAGE_LIMIT)
-            )
+        # 历史先算：丢了几条要写进 system prompt，让模型知道上下文有缺口。
+        history, dropped = self._prepare_history(
+            self.memory.recent(session_id, limit=self.HISTORY_MESSAGE_LIMIT)
         )
+        if dropped:
+            system += (
+                f"\n\n（对话历史较长，最早 {dropped} 条已省略。"
+                "涉及此前细节时不要凭印象回答，用工具重新查询。）"
+            )
+
+        messages: List[dict] = [{"role": "system", "content": system}]
+        messages.extend(history)
         return messages
+
+    def _resolve_skill(self, result):
+        """从 select_skill 的工具结果里取出目标 Skill（不信任结果里的 hint 文本）。"""
+
+        if not result.success or not isinstance(result.data, dict):
+            return None
+        if self.skill_registry is None:
+            return None
+        return self.skill_registry.get(str(result.data.get("name") or ""))
+
+    @staticmethod
+    def _skill_hint_message(skill) -> str:
+        return (
+            f"【场景已切换】当前场景：{skill.name}（{skill.description}）。"
+            "以下指引优先于此前任何场景指引：\n"
+            f"{skill.system_hint}"
+        )
 
     def _available_tool_schemas(
         self,
         saturated_tools: set[str],
         active_tool_names: Optional[set[str]] = None,
     ) -> List[dict]:
-        return [
-            schema
-            for schema in self.registry.schemas()
-            if schema.get("function", {}).get("name") not in saturated_tools
-            and (
-                active_tool_names is None
-                or schema.get("function", {}).get("name") in active_tool_names
-            )
-        ]
+        available = []
+        for schema in self.registry.schemas():
+            name = schema.get("function", {}).get("name")
+            if name in saturated_tools:
+                continue
+            # 场景切换工具必须在白名单收窄后仍然可见，否则无法切回。
+            if name in self.ALWAYS_AVAILABLE_TOOLS:
+                available.append(schema)
+                continue
+            if active_tool_names is not None and name not in active_tool_names:
+                continue
+            available.append(schema)
+        return available
 
     def _compact_history(self, messages: List[dict]) -> List[dict]:
-        compacted = []
-        for message in messages:
-            item = dict(message)
-            content = item.get("content")
-            if isinstance(content, str) and len(content) > self.HISTORY_CONTENT_LIMIT:
-                tail_length = min(300, self.HISTORY_CONTENT_LIMIT // 4)
-                head_length = self.HISTORY_CONTENT_LIMIT - tail_length
-                item["content"] = (
-                    content[:head_length]
-                    + "\n...[较长历史内容已压缩]...\n"
-                    + content[-tail_length:]
-                )
-            compacted.append(item)
-        return compacted
+        """逐条压缩历史消息（只做单条压缩，不做总量取舍）。
+
+        压缩按信息密度取舍：含约束词（必须 / 截止 / 锁定）、时间、ID、数字的段落
+        优先保留，纯叙述性的长段落先被丢掉。首尾两段始终保留——开头交代背景、
+        结尾通常是上一轮的结论。
+        """
+
+        kept, _ = prepare_history(
+            messages,
+            message_token_limit=self.HISTORY_MESSAGE_TOKEN_LIMIT,
+            total_token_limit=float("inf"),
+        )
+        return kept
+
+    def _prepare_history(self, messages: List[dict]) -> tuple[List[dict], int]:
+        """按 token 总预算从最新往回保留历史，返回 (消息, 被丢弃条数)。
+
+        真正的闸门是 token 而不是条数：10 条短消息和 10 条长消息差一个数量级。
+        """
+
+        return prepare_history(
+            messages,
+            message_token_limit=self.HISTORY_MESSAGE_TOKEN_LIMIT,
+            total_token_limit=self.HISTORY_TOKEN_BUDGET,
+        )
+
+    def _enforce_prompt_budget(self, messages: List[dict]) -> int:
+        """prompt 超预算时，按"体积最大优先"降级工具结果。
+
+        只降级 ``role == "tool"`` 的消息，且保留 success / summary / error——
+        协议要求每个 tool_call_id 都有对应的 tool 消息，所以只能瘦身不能删除。
+        返回削减后的估算 token 数。
+        """
+
+        total = estimate_messages_tokens(messages)
+        if total <= self.PROMPT_TOKEN_BUDGET:
+            return total
+
+        indexes = [
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "tool"
+        ]
+        indexes.sort(key=lambda i: estimate_message_tokens(messages[i]), reverse=True)
+
+        for index in indexes:
+            if total <= self.PROMPT_TOKEN_BUDGET:
+                break
+            before = estimate_message_tokens(messages[index])
+            degraded = degrade_tool_message(messages[index])
+            if degraded is None:
+                continue
+            messages[index] = degraded
+            total -= before - estimate_message_tokens(messages[index])
+
+        if total > self.PROMPT_TOKEN_BUDGET:
+            logger.warning(
+                "prompt 仍超出预算：%s > %s tokens（已降级所有工具结果）",
+                total,
+                self.PROMPT_TOKEN_BUDGET,
+            )
+        return total
 
     def _finalize_without_tools(
         self,
@@ -676,6 +943,7 @@ class AgentLoop:
     @staticmethod
     def tool_label(name: str) -> str:
         labels = {
+            "select_skill": "切换场景",
             "get_tasks": "读取任务",
             "get_events": "读取固定行程",
             "get_trips": "定位行程组",
@@ -737,42 +1005,10 @@ class AgentLoop:
                 {
                     "success": success,
                     "summary": summary,
-                    "data": _compact_tool_payload(data),
+                    "data": compact_payload(data),
                     "error": error,
                 },
                 ensure_ascii=False,
                 default=str,
             ),
         }
-
-
-def _compact_tool_payload(value, key: str = "", depth: int = 0):
-    """Keep decision-relevant tool output while dropping token-heavy detail."""
-
-    if depth >= 7:
-        return "[嵌套内容已省略]"
-    if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")
-    if isinstance(value, dict):
-        return {
-            item_key: _compact_tool_payload(item_value, item_key, depth + 1)
-            for item_key, item_value in value.items()
-        }
-    if isinstance(value, list):
-        if key == "path":
-            return {
-                "point_count": len(value),
-                "start": _compact_tool_payload(value[0], depth=depth + 1) if value else None,
-                "end": _compact_tool_payload(value[-1], depth=depth + 1) if value else None,
-            }
-        limit = 8 if key == "steps" else 30
-        items = [
-            _compact_tool_payload(item, depth=depth + 1)
-            for item in value[:limit]
-        ]
-        if len(value) > limit:
-            items.append({"omitted_count": len(value) - limit})
-        return items
-    if isinstance(value, str) and len(value) > 1200:
-        return value[:1000] + "...[内容已压缩]..." + value[-120:]
-    return value

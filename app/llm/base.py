@@ -19,6 +19,10 @@ class ToolCall:
     id: str = ""
     name: str = ""
     arguments: dict = field(default_factory=dict)
+    #: 模型给出的参数不是合法 JSON 对象时,这里保存面向模型的错误说明。
+    #: 非空时 loop 不会执行工具,而是把说明当作 Observation 回传,
+    #: 让模型重写整段参数——与"漏填字段"区分开,否则模型只会去补字段。
+    parse_error: Optional[str] = None
 
 
 @dataclass

@@ -27,6 +27,22 @@ class SkillRegistry:
     def register(self, skill: Skill) -> None:
         self._skills.append(skill)
 
+    def all(self) -> List[Skill]:
+        """返回全部已注册场景，供 ``select_skill`` 工具向模型展示清单。"""
+
+        return list(self._skills)
+
+    def names(self) -> List[str]:
+        return [skill.name for skill in self._skills]
+
+    def get(self, name: str) -> Optional[Skill]:
+        """按标识查找场景；模型自选场景时以 name 为准，不看关键词。"""
+
+        for skill in self._skills:
+            if skill.name == name:
+                return skill
+        return None
+
     def select(self, message: str) -> Optional[Skill]:
         """优先选择命中词更多、更具体的技能。"""
 

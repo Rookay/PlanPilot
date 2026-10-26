@@ -52,6 +52,9 @@ def agent_status():
         "max_tool_calls": agent.loop.MAX_TOOL_CALLS,
         "tool_call_limits": agent.loop.TOOL_CALL_LIMITS,
         "history_message_limit": agent.loop.HISTORY_MESSAGE_LIMIT,
+        "history_token_budget": agent.loop.HISTORY_TOKEN_BUDGET,
+        "history_message_token_limit": agent.loop.HISTORY_MESSAGE_TOKEN_LIMIT,
+        "prompt_token_budget": agent.loop.PROMPT_TOKEN_BUDGET,
     }
 
 
@@ -111,11 +114,6 @@ def agent_chat(
             [{"role": item.role, "content": item.content} for item in persisted],
         )
 
-    selected_skill = (
-        agent.loop.skill_registry.select(payload.message)
-        if payload.message.strip() and agent.loop.skill_registry is not None
-        else None
-    )
     started = time.perf_counter()
     result = agent.handle(
         db=db,
@@ -125,6 +123,13 @@ def agent_chat(
         decision=payload.decision,
     )
     duration_ms = int((time.perf_counter() - started) * 1000)
+    # 场景以 loop 的实际结果为准：关键词命中后模型仍可能通过 select_skill 覆盖，
+    # 这里若再自己 select 一次，展示给用户的会是错的那个。
+    selected_skill = (
+        agent.loop.skill_registry.get(result.selected_skill)
+        if result.selected_skill and agent.loop.skill_registry is not None
+        else None
+    )
     provider_name = (
         "ConfirmationExecutor"
         if payload.confirm_action_id
@@ -140,7 +145,9 @@ def agent_chat(
                 "label": "识别请求",
                 "status": "completed",
                 "summary": (
-                    f"已选择「{selected_skill.description}」能力"
+                    f"已切换到「{selected_skill.description}」能力"
+                    if selected_skill is not None and result.skill_source == "model"
+                    else f"已选择「{selected_skill.description}」能力"
                     if selected_skill is not None
                     else "按通用规划请求处理"
                 ),

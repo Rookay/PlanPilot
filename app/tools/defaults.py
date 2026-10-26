@@ -40,6 +40,7 @@ from app.tools.schedule_tools import (
     GetSchedulesTool,
     UpdateScheduleTool,
 )
+from app.tools.skill_tools import SelectSkillTool
 from app.tools.task_tools import (
     CompleteTaskTool,
     CreateTaskTool,
@@ -50,10 +51,19 @@ from app.tools.task_tools import (
 )
 
 
-def build_default_registry() -> ToolRegistry:
+def build_default_registry(skill_registry=None) -> ToolRegistry:
+    """构建默认工具集。
+
+    ``skill_registry`` 用于装配 ``select_skill``：模型需要一个能列举并切换
+    业务场景的入口。不传时该工具仍会注册，但执行时返回"场景注册表未配置"，
+    以保持既有调用方（测试、脚本）的行为不变。
+    """
+
     registry = ToolRegistry()
 
     for tool in [
+        # Skill（理解阶段，始终对模型可见）
+        SelectSkillTool(skill_registry),
         # Task
         GetTasksTool(),
         GetTaskTool(),

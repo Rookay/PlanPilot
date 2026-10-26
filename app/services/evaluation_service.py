@@ -160,12 +160,13 @@ def _run_scenario(scenario: EvaluationScenario) -> dict:
     state_check: Callable[[], bool] = lambda: True
     try:
         provider, prompt, state_check = _prepare_scenario(session, scenario.id)
+        skills = build_default_skills()
         agent = Agent(
             llm=provider,
-            registry=build_default_registry(),
+            registry=build_default_registry(skills),
             memory=Memory(),
             confirmation_store=PendingActionStore(),
-            skill_registry=build_default_skills(),
+            skill_registry=skills,
         )
         first = agent.handle(session, prompt, f"eval-{scenario.id}")
         model_tokens = int(first.model_usage.get("total_tokens") or 0)
