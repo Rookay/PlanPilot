@@ -48,23 +48,60 @@ if IS_SQLITE:
         DATABASE_FILE = Path(raw_path)
 
 
-engine = create_engine(
-    DATABASE_URL,
+#: 连接池上限。SQLite 单文件写只能串行，池开太大只会在数据库层排队，
+#: 因此默认 5 + 10 溢出，够 15 个并发请求；超过的请求在池上等待。
+#: 这是一条真实存在的天花板：要多撑并发必须换 Postgres（改 DATABASE_URL 即可）。
+POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
+POOL_TIMEOUT = float(os.getenv("DB_POOL_TIMEOUT", "30"))
+
+#: 内存库（测试）用 StaticPool，不接受 pool_size 参数，单独分支。
+IS_MEMORY_SQLITE = IS_SQLITE and ":memory:" in DATABASE_URL
+
+_engine_kwargs: dict = {
     # SQLite 默认禁止跨线程使用连接，FastAPI 的线程池需要关闭此限制。
-    connect_args={"check_same_thread": False} if IS_SQLITE else {},
-    future=True,
-)
+    "connect_args": {"check_same_thread": False} if IS_SQLITE else {},
+    "future": True,
+}
+if not IS_MEMORY_SQLITE:
+    _engine_kwargs.update(
+        pool_size=POOL_SIZE,
+        max_overflow=MAX_OVERFLOW,
+        pool_timeout=POOL_TIMEOUT,
+    )
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
+
+
+def configure_sqlite_connection(dbapi_connection) -> None:
+    """给单个 SQLite 连接设置外键、日志模式与锁等待。
+
+    单独抽成函数是为了可测：监听器只在模块级 engine 上注册，而测试不该为了
+    验证 pragma 去写真实数据库文件。
+
+    这三条不是"调优"，是正确性：
+
+    - ``foreign_keys``：SQLite 默认不校验外键，删任务会留下孤立日程。
+    - ``journal_mode=WAL``：默认的 rollback journal 下，一个写事务会挡住所有
+      读。本应用的写事务要跨多轮工具调用，锁窗口太长；WAL 让读写互不阻塞，
+      写与写之间才需要排队。
+    - ``busy_timeout``：遇到写锁时等多久再报 "database is locked"。sqlite3
+      默认 5 秒，对一个可能同时有十几个请求提交的服务偏短。
+    """
+
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    # 内存库会返回 "memory"，设不上去，不算错误。
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=15000")
+    cursor.close()
 
 
 if IS_SQLITE:
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:
-        """每个连接开启外键约束，避免删除任务后残留孤立日程。"""
-
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
+        configure_sqlite_connection(dbapi_connection)
 
 
 SessionLocal = sessionmaker(
