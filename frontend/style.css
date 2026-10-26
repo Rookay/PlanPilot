@@ -1426,6 +1426,28 @@ body {
 
 .chat-typing {
     color: #999;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* 一次请求最坏能跑一分多钟，只转圈没有出口是不可接受的：
+   这个按钮只断开"等待"，不保证服务端停下，文案里已经说明。 */
+.chat-stop {
+    padding: 2px 10px;
+    font-size: 12px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.chat-stop:hover {
+    color: #b42318;
+    border-color: rgba(180, 35, 24, 0.35);
+    background: rgba(180, 35, 24, 0.06);
 }
 
 .chat-input-bar {

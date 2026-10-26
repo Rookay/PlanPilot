@@ -38,6 +38,10 @@ const state = {
   chatLoading: false,
   chatSessionId: null,
   chatPendingConfirmation: null,
+  // 待重发的请求：同一条内容重发时复用它的 requestId，服务端才不会重复执行。
+  chatPendingRequest: null,
+  // 正在进行的对话请求，用于"停止"和服务端超时前的主动取消。
+  chatAbort: null,
   sessions: [],
   sessionsLoaded: false,
   preferences: null,
@@ -264,19 +268,64 @@ function eventDurationText(event) {
 ========================= */
 
 async function api(path, options = {}) {
-  const config = { ...options };
+  const { timeoutMs, ...rest } = options;
+  const config = { ...rest };
 
   // 只有带请求体时才发送 Content-Type，避免 GET/DELETE 触发多余的 CORS 预检。
   if (config.body !== undefined && !config.headers) {
     config.headers = { "Content-Type": "application/json" };
   }
 
-  const response = await fetch(`${API_URL}${path}`, config);
+  // 客户端兜底超时。服务端有单次请求时长上限，但那个上限只约束"模型循环"，
+  // 不覆盖排队、传输、网关这些环节；没有客户端超时的话，界面会无限转圈。
+  let timer = null;
+  let timedOut = false;
+  if (timeoutMs || config.signal) {
+    const controller = new AbortController();
+    const outer = config.signal;
+    if (outer) {
+      if (outer.aborted) {
+        controller.abort();
+      } else {
+        // 外部取消（用户点"停止"）也要能传到 fetch 上。
+        outer.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+    }
+    config.signal = controller.signal;
+    if (timeoutMs) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
+    }
+  }
+
+  let response;
+  try {
+    response = await fetch(`${API_URL}${path}`, config);
+  } catch (error) {
+    if (timedOut) {
+      const timeout = new Error(`请求超过 ${Math.round(timeoutMs / 1000)} 秒未返回`);
+      timeout.status = 0;
+      timeout.timeout = true;
+      throw timeout;
+    }
+    // AbortError 由调用方区分（用户主动取消），这里原样抛出并补上标记。
+    error.status = 0;
+    error.aborted = error.name === "AbortError";
+    throw error;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
+    let payload = null;
     try {
       const data = await response.json();
+      payload = data;
       if (data && data.detail) {
         detail =
           typeof data.detail === "string"
@@ -286,7 +335,11 @@ async function api(path, options = {}) {
     } catch (error) {
       /* 忽略解析失败，使用默认错误信息 */
     }
-    throw new Error(detail);
+    const failure = new Error(detail);
+    // 带上状态码：调用方要区分 409（同请求在跑）和其它失败。
+    failure.status = response.status;
+    failure.body = payload;
+    throw failure;
   }
 
   if (response.status === 204) {
@@ -3405,7 +3458,10 @@ function renderChatMessages() {
       ? `
         <div class="chat-bubble chat-assistant">
           <div class="chat-bubble-label">助手</div>
-          <div class="chat-bubble-content chat-typing">正在思考…</div>
+          <div class="chat-bubble-content chat-typing">
+            <span>正在思考…</span>
+            <button class="chat-stop" type="button" onclick="stopChatMessage()">停止</button>
+          </div>
         </div>
       `
       : "";
@@ -3758,6 +3814,23 @@ function autoResizeChatInput() {
   input.style.height = `${Math.min(input.scrollHeight, 120)}px`;
 }
 
+//: 客户端兜底超时。必须晚于服务端单次上限（默认 90 秒）再加一次模型调用，
+//: 否则服务端还在收尾、界面已经判失败，用户会看到"失败"但数据其实已写进去。
+const CHAT_CLIENT_TIMEOUT_MS = 150000;
+
+function newRequestId() {
+  if (window.crypto && crypto.randomUUID) {
+    return crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+  }
+  return `r${Date.now()}${Math.random().toString(16).slice(2, 12)}`.slice(0, 32);
+}
+
+function stopChatMessage() {
+  if (state.chatAbort) {
+    state.chatAbort.abort();
+  }
+}
+
 async function sendChatMessage() {
   const input = $("chatInput");
   const content = input.value.trim();
@@ -3771,6 +3844,15 @@ async function sendChatMessage() {
   state.chatPendingConfirmation = null;
   state.chatMessages.push({ role: "user", content });
   state.chatLoading = true;
+
+  // 同一条内容重发（上次超时或被中断）时复用 requestId：服务端若已经跑完，
+  // 直接把那次的结果还回来；若还在跑，会回 409 而不是再执行一遍。
+  const pending = state.chatPendingRequest;
+  const requestId =
+    pending && pending.content === content ? pending.requestId : newRequestId();
+  state.chatPendingRequest = { requestId, content };
+  state.chatAbort = new AbortController();
+
   renderChatMessages();
 
   try {
@@ -3779,8 +3861,14 @@ async function sendChatMessage() {
       body: JSON.stringify({
         message: content,
         session_id: state.chatSessionId,
+        request_id: requestId,
       }),
+      signal: state.chatAbort.signal,
+      timeoutMs: CHAT_CLIENT_TIMEOUT_MS,
     });
+
+    // 这次请求已经有确定结果，不必再用同一个 id 重发。
+    state.chatPendingRequest = null;
 
     state.chatSessionId = data.session_id;
     localStorage.setItem("planpilot_session_id", data.session_id);
@@ -3802,12 +3890,24 @@ async function sendChatMessage() {
     // 消息数和标题都变了，列表要跟着更新（新会话第一次说话后才会出现在列表里）。
     await loadSessions().catch(handleError);
   } catch (error) {
-    state.chatMessages.push({
-      role: "assistant",
-      content: `发送失败：${error.message}`,
-    });
+    let content_;
+    if (error.status === 409) {
+      content_ =
+        "上一条请求还在处理中，等它返回就行，不用重复发送（同一次请求不会被重复执行）。";
+    } else if (error.timeout) {
+      content_ =
+        `请求超过 ${Math.round(CHAT_CLIENT_TIMEOUT_MS / 1000)} 秒仍未返回，界面已停止等待。` +
+        "服务端可能还在跑——重发同样的话会复用同一次请求，不会重复创建任务。";
+    } else if (error.aborted) {
+      content_ =
+        "已停止这次请求。服务端可能仍在执行，结果会写进会话记录，刷新可见。";
+    } else {
+      content_ = `发送失败：${error.message}`;
+    }
+    state.chatMessages.push({ role: "assistant", content: content_ });
   } finally {
     state.chatLoading = false;
+    state.chatAbort = null;
     renderChatMessages();
   }
 }
@@ -3830,7 +3930,11 @@ async function confirmChatDecision(decision) {
         session_id: state.chatSessionId,
         confirm_action_id: pending.action_id,
         decision,
+        // 确认路径同样需要幂等：这是唯一会真的写数据的入口，
+        // 双击"确认"不该产生两遍执行。
+        request_id: newRequestId(),
       }),
+      timeoutMs: CHAT_CLIENT_TIMEOUT_MS,
     });
 
     state.chatSessionId = data.session_id;
