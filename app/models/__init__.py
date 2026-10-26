@@ -14,6 +14,8 @@ from app.models.plan_version import PlanVersion
 from app.models.agent_run import AgentRun
 from app.models.evaluation import EvaluationRun
 from app.models.pending_action import PendingAction
+from app.models.summary import SessionSummary
+from app.models.fact import MemoryFact
 
 __all__ = [
     "Task",
@@ -27,4 +29,6 @@ __all__ = [
     "AgentRun",
     "EvaluationRun",
     "PendingAction",
+    "SessionSummary",
+    "MemoryFact",
 ]

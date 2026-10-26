@@ -46,6 +46,30 @@ def recent_messages(db: Session, session_id: str, limit: int = 20) -> List[dict]
     return [{"role": row.role, "content": row.content} for row in rows]
 
 
+def window_messages(db: Session, session_id: str, limit: int = 60) -> List[dict]:
+    """取最近 ``limit`` 条消息，**带 id**，按时间正序返回。
+
+    和 :func:`recent_messages` 的唯一区别是多了 ``id``。摘要层需要它来判断
+    "这条消息是不是已经被折进摘要了"——``covered_to_message_id`` 靠 id 比较，
+    用条数或时间都不行：条数会被并发写入打乱，时间在同一秒内不可靠。
+    """
+
+    if limit <= 0:
+        return []
+
+    rows = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.id.desc())
+        .limit(limit)
+        .all()
+    )
+    rows.reverse()
+    return [
+        {"id": row.id, "role": row.role, "content": row.content} for row in rows
+    ]
+
+
 def append_message(
     db: Session,
     session_id: str,

@@ -22,10 +22,11 @@ from app.agent.compaction import (
 from app.agent.confirmation import PendingActionStore
 from app.agent.context import build_system_prompt, build_world_summary
 from app.agent.memory import Memory
+from app.agent.summary import fold_history
 from app.llm.base import LLMProvider
 from app.llm.exceptions import LLMAuthError, LLMRateLimitError, LLMTransientError
 from app.llm.mock import MockProvider
-from app.services import chat_service
+from app.services import fact_service
 from app.skills.base import SkillRegistry
 from app.tools.registry import ToolRegistry
 
@@ -97,6 +98,12 @@ class AgentLoop:
     HISTORY_TOKEN_BUDGET = 3600
     #: 单次 prompt 的 token 总预算，超了就按"最大的工具结果优先降级"来削。
     PROMPT_TOKEN_BUDGET = 18000
+    #: 读取消息窗口的上限。比保留窗口大得多：多出来的部分用来判断"该折多少进
+    #: 摘要"，折完只把最后 HISTORY_MESSAGE_LIMIT 条原样发给模型。
+    SUMMARY_WINDOW_MESSAGES = 60
+    #: 触发折叠的最少溢出条数。太小会让摘要每轮重写——每折一次就是一次模型调用，
+    #: 而摘要本身对细节是有损的，抖动着折反而更容易丢东西。
+    SUMMARY_MIN_FOLD_MESSAGES = 8
     TOOL_CALL_LIMITS = {
         "get_weather": 3,
         "get_events": 3,
@@ -740,13 +747,30 @@ class AgentLoop:
 
         system += "\n\n当前数据快照：\n" + build_world_summary(db, timezone)
 
+        # 长期事实排在这轮摘要之前：事实是跨会话稳定的（称呼、固定安排），
+        # 摘要只管本次会话。放前面等于告诉模型"先拿这些当背景，再看最近聊了什么"。
+        facts_text = fact_service.render_facts(fact_service.confirmed_facts(db))
+        if facts_text:
+            system += "\n\n" + facts_text
+
         # 历史从表里读，不查进程内缓存：多 worker 与进程重启都不会丢上下文。
         # 当前这轮的用户消息还没落库（事务在 API 层末尾才提交），单独补在末尾。
-        history, dropped = self._prepare_history(
-            chat_service.recent_messages(
-                db, session_id, limit=self.HISTORY_MESSAGE_LIMIT
-            )
+        #
+        # 顺序是"先折叠、再裁剪"：折叠把溢出窗口的消息变成摘要（信息保住了），
+        # 裁剪只是按 token 兜底。反过来做的话，裁剪会先把消息扔掉，等轮到折叠时
+        # 它们已经不在了——摘要里永远不会出现，约束就此丢失。
+        folded = fold_history(
+            db,
+            self._pick_provider(),
+            session_id,
+            window_limit=self.SUMMARY_WINDOW_MESSAGES,
+            keep_messages=self.HISTORY_MESSAGE_LIMIT,
+            min_fold_messages=self.SUMMARY_MIN_FOLD_MESSAGES,
         )
+        if folded.summary_text:
+            system += "\n\n" + folded.summary_text
+
+        history, dropped = self._prepare_history(folded.history)
         if dropped:
             system += (
                 f"\n\n（对话历史较长，最早 {dropped} 条已省略。"

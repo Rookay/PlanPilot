@@ -21,7 +21,7 @@ from app.schemas.agent import (
     ConfirmationInfoSchema,
 )
 from app.schemas.chat import ChatMessageResponse
-from app.services import agent_run_service, chat_service
+from app.services import agent_run_service, chat_service, summary_service
 
 router = APIRouter(
     prefix="/api/agent",
@@ -77,9 +77,16 @@ def session_messages(session_id: str, db: Session = Depends(get_db)):
 def clear_session_messages(session_id: str, db: Session = Depends(get_db)):
     deleted = chat_service.clear_messages(db, session_id)
     deleted_runs = agent_run_service.clear_runs(db, session_id)
+    # 摘要必须一起删：它存的是被删掉那些消息的归纳，留着等于"清空会话"没清干净，
+    # 下一轮还会把旧对话的约束重新注入 prompt。
+    deleted_summary = summary_service.clear_summary(db, session_id)
     db.commit()
     # 没有进程内缓存要清理：历史每次请求都从表里读，删表即生效。
-    return {"deleted": deleted, "deleted_runs": deleted_runs}
+    return {
+        "deleted": deleted,
+        "deleted_runs": deleted_runs,
+        "deleted_summary": deleted_summary,
+    }
 
 
 @router.get("/sessions/{session_id}/runs")

@@ -19,4 +19,7 @@ def make_session():
         connection.execute("PRAGMA foreign_keys=ON")
 
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, future=True)()
+    # autoflush 必须和生产 SessionLocal 一致（app/database.py 里是 False）。
+    # 测试用默认的 True 会掩盖"同一事务内查不到刚 add 的记录"这类 bug——
+    # memory_facts 的唯一约束冲突就是这么漏出去的。
+    return sessionmaker(bind=engine, autoflush=False, future=True)()

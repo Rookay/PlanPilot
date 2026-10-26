@@ -18,6 +18,7 @@ from app.api import (
     itineraries,
     locations,
     maps,
+    memory,
     preferences,
     schedules,
     tasks,
@@ -98,6 +99,7 @@ app.include_router(maps.router)
 app.include_router(locations.router)
 app.include_router(itineraries.router)
 app.include_router(evaluations.router)
+app.include_router(memory.router)
 
 # 把前端目录作为静态文件托管：打开 http://127.0.0.1:8000/frontend/ 即可使用。
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
