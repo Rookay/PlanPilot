@@ -1,5 +1,7 @@
 # PlanPilot
 
+[![tests](https://github.com/Rookay/PlanPilot/actions/workflows/tests.yml/badge.svg)](https://github.com/Rookay/PlanPilot/actions/workflows/tests.yml)
+
 PlanPilot 是一个本地优先的智能任务与日程规划 Agent。它把大模型用于理解需求、拆解意图和选择工具，把时间冲突、依赖关系、通勤约束与任务排序交给确定性规划引擎，因此即使模型暂时不可用，核心任务管理和自动排期仍可使用。
 
 项目重点不是让模型直接“编一份日程”，而是构建一个可验证、可回滚、可解释的规划闭环：
@@ -45,14 +47,18 @@ PlanPilot 是一个本地优先的智能任务与日程规划 Agent。它把大�
 ## 结构
 
 ```text
-frontend -> FastAPI routes -> services -> SQLAlchemy / planning engine
+frontend/          原生 JS，按业务域分 11 个文件（core / tasks / events / itinerary /
+                   planning / calendar / settings / chat / session / evaluations / main）
+    |
+    v
+FastAPI routes (10 个 router) -> services (15 个模块，schedule 再分 9 个专项) -> SQLAlchemy / planning engine
                     |
-                    +-> Agent loop -> skills -> tools -> services
+                    +-> Agent loop -> skills -> tools (37 个) -> services
                     |
                     +-> OpenAI-compatible provider / local rule fallback
 ```
 
-规划引擎不访问数据库、不调用模型，同一输入会得到同一结果。Service 层统一处理锁定、局部重排、版本快照和撤销；Agent 的多工具确认操作采用补偿事务，任一步失败都会恢复执行前状态。所有数据库时间统一保存为不带时区标记的 UTC，界面负责按用户本地时区显示。
+规划引擎不访问数据库、不调用模型，同一输入会得到同一结果。Service 层统一处理锁定、局部重排、版本快照和撤销；Agent 的多工具确认操作采用补偿事务，任一步失败都会恢复执行前状态，且只撤销本次写集——不会碰到其他会话提交的数据。所有数据库时间统一保存为不带时区标记的 UTC，界面负责按用户本地时区显示。
 
 ## 核心设计
 
@@ -105,13 +111,35 @@ frontend -> FastAPI routes -> services -> SQLAlchemy / planning engine
 
 ## 测试
 
-测试只使用 Python 标准库 `unittest` 和项目已有依赖，不会启动 Web 服务：
+331 个用例，只用 Python 标准库 `unittest` 和项目已有依赖，不会启动 Web 服务。
+
+```bash
+make test           # 详细输出
+make test-quiet     # 只输出结果
+```
+
+Windows 上没有 `make` 时用等价命令：
 
 ```powershell
 & "G:\Anaconda\envs\agent\python.exe" -m unittest discover -s tests -v
 ```
 
-当前测试覆盖规划优先级与间隔、过去时间保护、日/周范围规划、方案差异、偏好时段、UTC/本地时间换算、午休避让、任务拆分与依赖、多段日程组原子修订、分段交通方式、确认前路线复核、持久化执行轨迹、端到端 Agent 评测、局部重排与锁定、版本撤销、地图通勤约束、模型代理故障恢复和批量回滚。
+覆盖范围：规划优先级与间隔、过去时间保护、日/周范围规划、方案差异、偏好时段、UTC/本地时间换算、午休避让、任务拆分与依赖、多段日程组原子修订、分段交通方式、确认前路线复核、持久化执行轨迹、端到端 Agent 评测、局部重排与锁定、版本撤销、地图通勤约束、模型代理故障恢复和批量回滚。
+
+其中三类是「只有实现、没有证据」时最容易翻车的地方，单独建了文件：
+
+| 文件 | 守什么 |
+|---|---|
+| `test_concurrency.py` | 8 线程同时抢同一个 `request_id` 只能有一个赢；4 写 + 4 读混合负载零锁失败、零丢写。用真实文件库 + 每线程独立 session，因为内存库的 `StaticPool` 共用一个连接，测不出锁行为 |
+| `test_request_lifecycle.py` | 幂等状态机六种迁移、重放不产生第二次执行、in-flight 返回 409、超时保留部分结果 |
+| `test_agent_transaction.py` | 回滚只撤销本次写集，别的会话提交的数据不受影响；工具层不得新开 Session（静态扫描） |
+
+## 工程实践
+
+- **CI**：GitHub Actions 在 Python 3.10 / 3.12 上跑 `pip check` + `compileall` + 全量测试。
+- **依赖锁定**：`requirements.txt` 只给支持范围，`requirements.lock` 锁到实测版本，CI 用后者。不锁传递依赖——Windows 上 `pip freeze` 会带 `pywin32` 等平台包，全量冻结会让 Linux CI 装不上。
+- **换行符**：`.gitattributes` 固定 `Makefile` 与 CI 配置为 LF。本机 `core.autocrlf=true`，不固定的话 Makefile 的 recipe 会带 CRLF，在 Linux 上直接报 missing separator，而这个错误在 Windows 本地根本复现不了。
+- **已知边界**：SQLite 单文件写只能串行，连接池上限 5 + 10，即最多 15 个并发请求，再多会在池上排队。要更高并发需要把 `DATABASE_URL` 换成 Postgres；但迁移前得先把 service 层的 20 多处自行 `commit()` 上移到请求层，否则跨表事务和确认流回滚都不成立。
 
 ## 数据与安全
 
