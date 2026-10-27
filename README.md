@@ -111,7 +111,7 @@ FastAPI routes (10 个 router) -> services (15 个模块，schedule 再分 9 个
 
 ## 测试
 
-331 个用例，只用 Python 标准库 `unittest` 和项目已有依赖，不会启动 Web 服务。
+345 个用例，只用 Python 标准库 `unittest` 和项目已有依赖，不会启动 Web 服务。
 
 ```bash
 make test           # 详细输出
