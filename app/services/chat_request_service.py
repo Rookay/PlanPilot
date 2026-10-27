@@ -11,6 +11,7 @@
 因此这里的 commit 是刻意为之，不是"忘了合并事务"：抢占是一次很短的写事务，
 之后的长执行不持锁。
 """
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import timedelta
@@ -30,10 +31,23 @@ class Reservation:
     - ``new``：抢到了，调用方负责执行并在结束时 finish / fail。
     - ``running``：同 id 的请求正在执行，调用方应回 409。
     - ``done``：同 id 已成功执行完，``response`` 是当时的响应体，直接重放。
+    - ``mismatch``：同 id 但内容不一样——幂等键被复用了，调用方应回 409。
     """
 
     state: str
     response: Optional[dict] = None
+
+
+def _fingerprint(message: str, extra: str = "") -> str:
+    """请求内容指纹。
+
+    幂等键只证明"这是同一次请求的重发"，前提是内容也一致。id 相同内容不同，
+    说明客户端复用了键（多标签页、缓存了旧 id、或手写脚本），此时重放会把
+    上一次的答案当成本次问题的答案——比直接报错更糟。
+    """
+
+    payload = f"{extra or ''}\x00{message or ''}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _response_of(row: ChatRequest) -> Optional[dict]:
@@ -60,11 +74,25 @@ def reserve(
     request_id: str,
     session_id: str,
     message: str = "",
+    extra: str = "",
 ) -> Reservation:
-    """抢占 request_id。返回 ``new`` 才表示本次请求应该真正执行。"""
+    """抢占 request_id。返回 ``new`` 才表示本次请求应该真正执行。
 
+    ``extra`` 是除消息之外的参与指纹的内容（例如确认动作 id 与 agree/reject），
+    因为确认请求的 ``message`` 是空串，只靠消息无法区分两次不同的确认。
+    """
+
+    fingerprint = _fingerprint(message, extra)
     existing = db.get(ChatRequest, request_id)
     if existing is not None:
+        if existing.payload_hash and existing.payload_hash != fingerprint:
+            # 同一个 id 换了内容：不能重放（会把旧答案当新答案），也不能直接
+            # 执行（那就等于允许一个 id 反复执行，幂等键失去意义）。
+            return Reservation("mismatch")
+        if not existing.payload_hash:
+            # 老数据没有指纹：无从校验，按兼容处理并回填，下次就能比对了。
+            existing.payload_hash = fingerprint
+            db.commit()
         if existing.status == "done":
             payload = _response_of(existing)
             if payload is not None:
@@ -99,6 +127,7 @@ def reserve(
             session_id=session_id,
             status="running",
             message_preview=(message or "")[:200],
+            payload_hash=fingerprint,
             updated_at=utcnow(),
         )
     )
@@ -108,6 +137,8 @@ def reserve(
         # 两个线程同时过了上面的 db.get：主键冲突说明对方赢了，按已存在处理。
         db.rollback()
         row = db.get(ChatRequest, request_id)
+        if row is not None and row.payload_hash and row.payload_hash != fingerprint:
+            return Reservation("mismatch")
         if row is not None and row.status == "done":
             payload = _response_of(row)
             if payload is not None:

@@ -127,6 +127,44 @@ class ReservationTests(TestCase):
         self.assertIsNone(self.db.get(ChatRequest, "r1"))
         self.assertIsNotNone(self.db.get(ChatRequest, "r2"))
 
+    def test_same_id_different_message_is_mismatch(self):
+        crs.reserve(self.db, "r1", "s1", "今天下午有什么安排")
+        crs.finish(self.db, "r1", {"reply": "你有一个会"})
+        self.db.commit()
+
+        # 同 id 换了内容：重放会把旧答案当新答案，直接执行又等于让一个 id
+        # 反复执行，两者都不对，只能拒绝。
+        self.assertEqual(
+            crs.reserve(self.db, "r1", "s1", "把所有任务都删了").state, "mismatch"
+        )
+
+    def test_different_confirm_actions_are_not_the_same_request(self):
+        # 确认请求的 message 是空串，只靠消息无法区分两次不同的确认，
+        # 所以确认动作要进指纹。
+        self.assertEqual(
+            crs.reserve(self.db, "c1", "s1", "", extra="act-a|accept").state, "new"
+        )
+        crs.finish(self.db, "c1", {"reply": "ok"})
+        self.db.commit()
+
+        self.assertEqual(
+            crs.reserve(self.db, "c1", "s1", "", extra="act-a|accept").state, "done"
+        )
+        self.assertEqual(
+            crs.reserve(self.db, "c1", "s1", "", extra="act-b|accept").state, "mismatch"
+        )
+
+    def test_legacy_row_without_fingerprint_still_replays(self):
+        crs.reserve(self.db, "r1", "s1", "你好")
+        crs.finish(self.db, "r1", {"reply": "在"})
+        row = self.db.get(ChatRequest, "r1")
+        row.payload_hash = None  # 模拟加指纹列之前写下的老数据
+        self.db.commit()
+
+        # 无从校验时不能把老数据全部判成 mismatch，否则升级后在建的请求全废。
+        self.assertEqual(crs.reserve(self.db, "r1", "s1", "你好").state, "done")
+        self.assertIsNotNone(self.db.get(ChatRequest, "r1").payload_hash)
+
 
 class _FakeLoop:
     """只为 API 层测试提供 _chat_once 会读的那几个属性。"""
@@ -215,6 +253,36 @@ class ChatIdempotencyApiTests(TestCase):
         self._post(message="看看任务", session_id="s1")
 
         self.assertEqual(len(self.fake.calls), 2)
+
+    def test_same_id_with_different_message_returns_409(self):
+        first = self._post(message="看看任务", session_id="s1", request_id="req-1")
+        second = self._post(message="把任务全删了", session_id="s1", request_id="req-1")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
+        self.assertIn("request_id", second.json()["detail"])
+        # 既没有执行第二次，也没有把旧答案当成本次问题的答案返回。
+        self.assertEqual(len(self.fake.calls), 1)
+
+    def test_confirm_with_another_action_id_returns_409(self):
+        first = self._post(
+            message="",
+            session_id="s1",
+            confirm_action_id="act-a",
+            decision="accept",
+            request_id="req-1",
+        )
+        second = self._post(
+            message="",
+            session_id="s1",
+            confirm_action_id="act-b",
+            decision="accept",
+            request_id="req-1",
+        )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(len(self.fake.calls), 1)
 
     def test_failure_marks_request_failed_not_stuck_running(self):
         def boom(*_args, **_kwargs):

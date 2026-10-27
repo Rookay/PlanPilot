@@ -35,6 +35,12 @@ class ChatRequest(Base):
     #: 用户消息的前若干字符，排查时能看出这条请求在干什么，不做业务用途。
     message_preview = Column(String(200), nullable=True)
 
+    #: 请求内容的指纹（消息 + 确认动作 + 决定）。
+    #: 只有 id 相同、内容也相同才算"同一次请求的重发"；id 相同内容不同是
+    #: 客户端复用了幂等键，必须拒绝——否则重放会把上一次的答案当成本次的答案。
+    #: 老数据没有这一列，为 NULL 时按"无法校验"处理，不阻断。
+    payload_hash = Column(String(64), nullable=True)
+
     #: 完整响应体（AgentChatResponse 的 JSON），重放时原样返回。
     response_json = Column(Text, nullable=True)
 

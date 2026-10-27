@@ -181,9 +181,18 @@ def agent_chat(
     if request_id is None:
         return _chat_once(db, payload, session_id)
 
+    # 确认请求的 message 是空串，所以确认动作与决定也要进指纹，否则两次不同的
+    # 确认会被当成同一次重发。
+    extra = f"{payload.confirm_action_id or ''}|{payload.decision or ''}"
     reservation = chat_request_service.reserve(
-        db, request_id, session_id, payload.message
+        db, request_id, session_id, payload.message, extra=extra
     )
+    if reservation.state == "mismatch":
+        raise HTTPException(
+            status_code=409,
+            detail="同一个 request_id 的内容与首次不一致（幂等键被复用），"
+            "请换一个新的 request_id 重新发送",
+        )
     if reservation.state == "done":
         # 重放：直接返回第一次的响应体，不再产生任何副作用，也不再扣费。
         return reservation.response

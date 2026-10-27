@@ -64,10 +64,14 @@ class Agent:
         # **不得** 新开 Session——所有改动必须走同一个 Session，否则
         # ``AgentDatabaseSnapshot`` 的写集抓不到，失败时无法补偿。
         # service 层自己 commit 是允许的（见 transaction.py 顶部说明）。
-        pending = self.confirmation_store.get(db, action_id, session_id)
+        #
+        # 用 claim 而不是 get：同一份待确认操作只能被消费一次。双击确认、
+        # 两个标签页同时点、或者多 worker 各收到一份，都只有一次能抢到。
+        pending = self.confirmation_store.claim(db, action_id, session_id)
         if pending is None:
             return AgentResult(
-                reply="该确认请求不存在或已过期，请重新发起操作。",
+                reply="该确认请求不存在、已过期，或已经被另一次点击处理过了。"
+                "如果操作没有生效，请重新发起。",
                 session_id=session_id,
             )
 
@@ -119,9 +123,12 @@ class Agent:
                 break
 
         if errors:
-            # 先回滚再清待确认：restore 会按写集撤销本次改动，失败时保留
-            # pending 记录，用户可以重新发起确认再试一次。
+            # 先回滚再退回领取：restore 会按写集撤销本次改动，release 把状态
+            # 放回 pending，用户可以重新发起确认再试一次。
+            # 万一 restore 自己抛异常，claim 会一直停在 taken，由
+            # CLAIM_TIMEOUT_SECONDS 超时接管——宁可晚一点可重试，也不能重复执行。
             snapshot.restore(db)
+            self.confirmation_store.release(db, action_id)
             applied = []
             proposed = []
             reply = "操作未能完成，已恢复修改前状态：" + "；".join(errors)

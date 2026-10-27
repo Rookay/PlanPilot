@@ -501,8 +501,9 @@ async function confirmChatDecision(decision) {
         session_id: state.chatSessionId,
         confirm_action_id: pending.action_id,
         decision,
-        // 确认路径同样需要幂等：这是唯一会真的写数据的入口，
-        // 双击"确认"不该产生两遍执行。
+        // 确认路径同样带幂等键：网络层重试同一次点击时不能执行两遍。
+        // 双击则由服务端保证——每次点击是新 id，服务端靠待确认操作的领取状态
+        // 只让第一次真正执行，第二次直接回"已被另一次点击处理过"。
         request_id: newRequestId(),
       }),
       timeoutMs: CHAT_CLIENT_TIMEOUT_MS,

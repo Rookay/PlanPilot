@@ -168,6 +168,16 @@ _COLUMN_ADDITIONS: dict = {
         # 主题键：判断两条事实说的是不是同一件事，见 app/services/fact_service.py。
         "subject": "VARCHAR(120)",
     },
+    "pending_actions": {
+        # 领取状态：确认操作必须一次性消费，见 app/agent/confirmation.py。
+        # 老数据补上时默认 pending，与"还没被领取过"的语义一致。
+        "status": "VARCHAR(16) NOT NULL DEFAULT 'pending'",
+        "taken_at": "DATETIME",
+    },
+    "chat_requests": {
+        # 请求内容指纹：同 id 换了内容要拒绝，见 app/services/chat_request_service.py。
+        "payload_hash": "VARCHAR(64)",
+    },
 }
 
 #: 需要在补列之后确保存在的索引：``(索引名, 表, 列)``。
@@ -181,6 +191,7 @@ _INDEXES: tuple = (
     ("ix_chat_messages_session_id", "chat_messages", "session_id"),
     ("ix_chat_messages_agent_run_id", "chat_messages", "agent_run_id"),
     ("ix_memory_facts_subject", "memory_facts", "subject"),
+    ("ix_pending_actions_status", "pending_actions", "status"),
 )
 
 
